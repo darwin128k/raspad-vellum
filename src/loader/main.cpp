@@ -8,7 +8,7 @@
 #include "launcher.h"
 #endif
 
-/* RevEmu loader for cstrike.exe. Default: set up Steam and CreateProcess
+/* Vellum loader for cstrike.exe. Default: set up Steam and CreateProcess
  * ProcName (hl.exe). With REVLOADER_STANDALONE: same Steam setup, then run
  * GoldSrc in this process via hl's HlLauncher_Run (sources from -DHL_DIR).
  * With REVLOADER_LAUNCHER_DLLS, optional [Loader] Dlls= in rev.ini is

@@ -1,7 +1,6 @@
-# revloader
+# Vellum
 
-Replacement for `cstrike.exe` for No-Steam GoldSrc, plus a `steamclient.dll` that
-speaks a private **Vellum** ticket. Two CMake targets:
+GoldSrc loader and `steamclient.dll` for the Raspad stack. Two CMake targets:
 
 - **loader** (`cstrike.exe`) — Steam IPC, `steam.dll` in this process, then either
   `CreateProcess` on `ProcName` from `rev.ini` or in-process GoldSrc (standalone).
@@ -15,15 +14,15 @@ repository and becomes the game process itself.
 
 ## Modes
 
-**Loader (default).** Like RevLoader 2014: Steam IPC, `steam.dll` in this process,
-`CreateProcess` on `ProcName` from `rev.ini` (usually `hl.exe -game cstrike`), waits
-for `hl.exe` to exit. The loader pid stays the "live Steam".
+**Loader (default).** Steam IPC, `steam.dll` in this process, `CreateProcess` on
+`ProcName` from `rev.ini` (usually `hl.exe -game cstrike`), waits for `hl.exe` to
+exit. The loader pid stays the "live Steam".
 
 **Standalone.** Same Steam, then `HlLauncher_Run` from the `hl` repository in the
 same process. A separate `hl.exe` is not needed.
 
-Persona name is read from `rev.ini` `[steamclient] PlayerName=` (same key RevEmu
-used). Identity for the ticket is `COMPUTERNAME` plus the C: volume serial.
+Persona name is read from `rev.ini` `[steamclient] PlayerName=`. Identity for the
+ticket is `COMPUTERNAME` plus the C: volume serial.
 
 ## Build
 
