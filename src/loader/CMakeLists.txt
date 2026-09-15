@@ -1,21 +1,26 @@
-add_executable(cstrike WIN32 main.cpp)
+if(WIN32)
+    add_executable(cstrike WIN32 main.cpp)
 
-set(CSTRIKE_RES "${CMAKE_CURRENT_BINARY_DIR}/cstrike.res")
-add_custom_command(
-    OUTPUT "${CSTRIKE_RES}"
-    COMMAND "${CMAKE_RC_COMPILER}" /nologo /i "${CMAKE_SOURCE_DIR}/res" /fo "${CSTRIKE_RES}" "${CMAKE_SOURCE_DIR}/res/cstrike.rc"
-    DEPENDS "${CMAKE_SOURCE_DIR}/res/cstrike.rc" "${CMAKE_SOURCE_DIR}/res/cstrike.ico"
-    COMMENT "Embedding cstrike.ico"
-    VERBATIM
-)
-target_sources(cstrike PRIVATE "${CSTRIKE_RES}")
-set_source_files_properties("${CSTRIKE_RES}" PROPERTIES EXTERNAL_OBJECT TRUE GENERATED TRUE)
-target_link_libraries(cstrike PRIVATE advapi32 shell32 user32)
-target_compile_definitions(cstrike PRIVATE _CRT_SECURE_NO_WARNINGS)
+    set(CSTRIKE_RES "${CMAKE_CURRENT_BINARY_DIR}/cstrike.res")
+    add_custom_command(
+        OUTPUT "${CSTRIKE_RES}"
+        COMMAND "${CMAKE_RC_COMPILER}" /nologo /i "${CMAKE_SOURCE_DIR}/res" /fo "${CSTRIKE_RES}" "${CMAKE_SOURCE_DIR}/res/cstrike.rc"
+        DEPENDS "${CMAKE_SOURCE_DIR}/res/cstrike.rc" "${CMAKE_SOURCE_DIR}/res/cstrike.ico"
+        COMMENT "Embedding cstrike.ico"
+        VERBATIM
+    )
+    target_sources(cstrike PRIVATE "${CSTRIKE_RES}")
+    set_source_files_properties("${CSTRIKE_RES}" PROPERTIES EXTERNAL_OBJECT TRUE GENERATED TRUE)
+    target_link_libraries(cstrike PRIVATE advapi32 shell32 user32)
+    target_compile_definitions(cstrike PRIVATE _CRT_SECURE_NO_WARNINGS)
+else()
+    add_executable(cstrike main_linux.cpp)
+    target_include_directories(cstrike PRIVATE ${CMAKE_SOURCE_DIR}/src/common)
+endif()
 
 if(REVLOADER_STANDALONE)
     if(HL_DIR STREQUAL "")
-        message(FATAL_ERROR "REVLOADER_STANDALONE=ON requires -DHL_DIR=/path/to/hl")
+        message(FATAL_ERROR "REVLOADER_STANDALONE=ON requires -DHL_DIR=/path/to/raspad-hl")
     endif()
     get_filename_component(HL_DIR "${HL_DIR}" ABSOLUTE)
     if(NOT EXISTS "${HL_DIR}/src/launcher.cpp")
@@ -25,6 +30,9 @@ if(REVLOADER_STANDALONE)
     target_include_directories(cstrike PRIVATE "${HL_DIR}/src")
     target_compile_definitions(cstrike PRIVATE REVLOADER_STANDALONE)
     message(STATUS "vellum standalone: using hl sources from ${HL_DIR}")
+    if(NOT WIN32)
+        target_link_libraries(cstrike PRIVATE dl)
+    endif()
     if(HL_METAHHOOK)
         if(METAHOOK_DIR STREQUAL "")
             set(METAHOOK_DIR "${HL_DIR}/../metahook")
@@ -32,6 +40,8 @@ if(REVLOADER_STANDALONE)
         include("${HL_DIR}/cmake/MetaHookEmbed.cmake")
         hl_embed_metahook(cstrike "${METAHOOK_DIR}")
     endif()
+elseif(NOT WIN32)
+    target_link_options(cstrike PRIVATE -static -static-libstdc++ -static-libgcc)
 endif()
 
 if(REVLOADER_LAUNCHER_DLLS)

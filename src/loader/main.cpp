@@ -9,10 +9,10 @@
 #endif
 
 /* Vellum loader for cstrike.exe. Default: set up Steam and CreateProcess
- * ProcName (hl.exe). With REVLOADER_STANDALONE: same Steam setup, then run
- * GoldSrc in this process via hl's HlLauncher_Run (sources from -DHL_DIR).
- * With REVLOADER_LAUNCHER_DLLS, optional [Loader] Dlls= in rev.ini is
- * forwarded as repeated -dll flags. */
+ * ProcName (hl.exe from raspad-hl). With REVLOADER_STANDALONE: same Steam
+ * setup, then GoldSrc in this process via HlLauncher_Run (sources from
+ * -DHL_DIR). With REVLOADER_LAUNCHER_DLLS, optional [Loader] Dlls= in
+ * rev.ini is forwarded as repeated -dll flags. */
 
 #define STEAM_IPC_MAPPING_NAME "Local\\SteamStart_SharedMemFile"
 #define STEAM_IPC_EVENT_NAME   "Local\\SteamStart_SharedMemLock"

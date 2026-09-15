@@ -1,5 +1,6 @@
 #include "types.h"
 #include "identity.h"
+#include "exports.h"
 
 #include <string.h>
 #include <time.h>
@@ -521,9 +522,7 @@ void *SteamClient::GetISteamGenericInterface(HSteamUser user, HSteamPipe pipe, c
 
 static SteamClient g_client;
 
-extern "C" {
-
-__declspec(dllexport) void *__cdecl CreateInterface(const char *pName, int *pReturnCode)
+STEAM_EXPORT void *STEAM_CALL CreateInterface(const char *pName, int *pReturnCode)
 {
 	Vellum_InitIdentity();
 	if (pName != NULL && (strcmp(pName, "SteamClient012") == 0 || strcmp(pName, "SteamClient011") == 0)) {
@@ -534,16 +533,14 @@ __declspec(dllexport) void *__cdecl CreateInterface(const char *pName, int *pRet
 	return NULL;
 }
 
-__declspec(dllexport) bool __cdecl Steam_BGetCallback(HSteamPipe, CallbackMsg_t *)
+STEAM_EXPORT bool STEAM_CALL Steam_BGetCallback(HSteamPipe, CallbackMsg_t *)
 {
 	return false;
 }
 
-__declspec(dllexport) void __cdecl Steam_FreeLastCallback(HSteamPipe) {}
+STEAM_EXPORT void STEAM_CALL Steam_FreeLastCallback(HSteamPipe) {}
 
-__declspec(dllexport) bool __cdecl Steam_GetAPICallResult(HSteamPipe, SteamAPICall_t, void *, int, int, bool *)
+STEAM_EXPORT bool STEAM_CALL Steam_GetAPICallResult(HSteamPipe, SteamAPICall_t, void *, int, int, bool *)
 {
 	return false;
 }
-
-} /* extern "C" */

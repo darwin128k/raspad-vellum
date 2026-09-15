@@ -1,9 +1,26 @@
 #include "identity.h"
 
-#include <windows.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include "ini.h"
+#include <pwd.h>
+#include <unistd.h>
+#endif
+
+#ifndef MAX_PATH
+#define MAX_PATH 4096
+#endif
+
+#ifdef _WIN32
+#define vellum_snprintf _snprintf
+#else
+#define vellum_snprintf snprintf
+#endif
 
 static_assert(sizeof(VellumTicket) == 64, "Vellum ticket must stay 64 bytes");
 
@@ -14,13 +31,18 @@ static void JoinPath(char *out, size_t outSize, const char *dir, const char *fil
 {
 	size_t n = strlen(dir);
 	if (n > 0 && (dir[n - 1] == '\\' || dir[n - 1] == '/')) {
-		_snprintf(out, outSize, "%s%s", dir, file);
+		vellum_snprintf(out, outSize, "%s%s", dir, file);
 	} else {
-		_snprintf(out, outSize, "%s\\%s", dir, file);
+#ifdef _WIN32
+		vellum_snprintf(out, outSize, "%s\\%s", dir, file);
+#else
+		vellum_snprintf(out, outSize, "%s/%s", dir, file);
+#endif
 	}
 	out[outSize - 1] = '\0';
 }
 
+#ifdef _WIN32
 static void DirFromThisDll(char *dir, size_t dirSize)
 {
 	HMODULE mod = NULL;
@@ -33,6 +55,24 @@ static void DirFromThisDll(char *dir, size_t dirSize)
 		slash[1] = '\0';
 	}
 }
+#else
+static void DirFromThisDll(char *dir, size_t dirSize)
+{
+	ssize_t n = readlink("/proc/self/exe", dir, dirSize - 1);
+	char *slash;
+
+	if (n > 0) {
+		dir[n] = '\0';
+		slash = strrchr(dir, '/');
+		if (slash != NULL) {
+			slash[1] = '\0';
+			return;
+		}
+	}
+	strncpy(dir, "./", dirSize - 1);
+	dir[dirSize - 1] = '\0';
+}
+#endif
 
 static uint32 ReadAppId(const char *dir)
 {
@@ -54,6 +94,108 @@ static uint32 ReadAppId(const char *dir)
 	return id ? id : 10;
 }
 
+#ifdef _WIN32
+static void FillPersona(char *persona, size_t personaSize, const char *iniPath)
+{
+	GetPrivateProfileStringA("steamclient", "PlayerName", "", persona, (DWORD)personaSize, iniPath);
+	if (persona[0] == '\0') {
+		DWORD n = (DWORD)personaSize;
+		if (!GetUserNameA(persona, &n) || persona[0] == '\0') {
+			strncpy(persona, "Vellum", personaSize - 1);
+			persona[personaSize - 1] = '\0';
+		}
+	}
+}
+
+static void FillIdent(char *ident, size_t identSize, uint16 *ident_len)
+{
+	char computer[MAX_COMPUTERNAME_LENGTH + 1] = {};
+	DWORD cn = sizeof(computer);
+	if (!GetComputerNameA(computer, &cn) || computer[0] == '\0') {
+		strncpy(computer, "PC", sizeof(computer) - 1);
+	}
+
+	DWORD serial = 0;
+	GetVolumeInformationA("C:\\", NULL, 0, &serial, NULL, NULL, NULL, 0);
+
+	_snprintf(ident, identSize, "%s-%08X", computer, (unsigned)serial);
+	ident[identSize - 1] = '\0';
+	*ident_len = (uint16)strlen(ident);
+}
+#else
+static void FillPersona(char *persona, size_t personaSize, const char *iniPath)
+{
+	Vellum_IniGet(iniPath, "steamclient", "PlayerName", persona, personaSize, "");
+	if (persona[0] == '\0') {
+		struct passwd *pw = getpwuid(getuid());
+		if (pw != NULL && pw->pw_name != NULL && pw->pw_name[0] != '\0') {
+			strncpy(persona, pw->pw_name, personaSize - 1);
+			persona[personaSize - 1] = '\0';
+		} else {
+			strncpy(persona, "Vellum", personaSize - 1);
+			persona[personaSize - 1] = '\0';
+		}
+	}
+}
+
+static uint32 ReadMachineSerial(void)
+{
+	FILE *f = fopen("/etc/machine-id", "r");
+	char buf[64] = {};
+	size_t n;
+	size_t i;
+	unsigned v = 0;
+	int digits = 0;
+
+	if (f == NULL) {
+		f = fopen("/var/lib/dbus/machine-id", "r");
+	}
+	if (f == NULL) {
+		return 1;
+	}
+	n = fread(buf, 1, sizeof(buf) - 1, f);
+	fclose(f);
+	buf[n] = '\0';
+
+	for (i = 0; buf[i] != '\0' && digits < 8; i++) {
+		unsigned d;
+		char c = buf[i];
+		if (c == ' ' || c == '\t' || c == '\r' || c == '\n') {
+			continue;
+		}
+		if (c >= '0' && c <= '9') {
+			d = (unsigned)(c - '0');
+		} else if (c >= 'a' && c <= 'f') {
+			d = (unsigned)(c - 'a' + 10);
+		} else if (c >= 'A' && c <= 'F') {
+			d = (unsigned)(c - 'A' + 10);
+		} else {
+			break;
+		}
+		v = (v << 4) | d;
+		digits++;
+	}
+	return digits == 8 && v != 0 ? (uint32)v : 1u;
+}
+
+static void FillIdent(char *ident, size_t identSize, uint16 *ident_len)
+{
+	char computer[256] = {};
+	if (gethostname(computer, sizeof(computer) - 1) != 0 || computer[0] == '\0') {
+		strncpy(computer, "PC", sizeof(computer) - 1);
+	}
+	computer[sizeof(computer) - 1] = '\0';
+	/* ident is 48 bytes: hostname + '-' + 8 hex. Cap like Win32 NetBIOS. */
+	if (strlen(computer) > 32) {
+		computer[32] = '\0';
+	}
+
+	snprintf(ident, identSize, "%s-%08X", computer, (unsigned)ReadMachineSerial());
+	ident[identSize - 1] = '\0';
+	*ident_len = (uint16)strlen(ident);
+}
+#endif
+
 void Vellum_InitIdentity()
 {
 	if (g_ready) {
@@ -66,26 +208,8 @@ void Vellum_InitIdentity()
 	char iniPath[MAX_PATH];
 	JoinPath(iniPath, sizeof(iniPath), dir, "rev.ini");
 
-	GetPrivateProfileStringA("steamclient", "PlayerName", "", g_id.persona, sizeof(g_id.persona), iniPath);
-	if (g_id.persona[0] == '\0') {
-		DWORD n = sizeof(g_id.persona);
-		if (!GetUserNameA(g_id.persona, &n) || g_id.persona[0] == '\0') {
-			strncpy(g_id.persona, "Vellum", sizeof(g_id.persona) - 1);
-		}
-	}
-
-	char computer[MAX_COMPUTERNAME_LENGTH + 1] = {};
-	DWORD cn = sizeof(computer);
-	if (!GetComputerNameA(computer, &cn) || computer[0] == '\0') {
-		strncpy(computer, "PC", sizeof(computer) - 1);
-	}
-
-	DWORD serial = 0;
-	GetVolumeInformationA("C:\\", NULL, 0, &serial, NULL, NULL, NULL, 0);
-
-	_snprintf(g_id.ident, sizeof(g_id.ident), "%s-%08X", computer, (unsigned)serial);
-	g_id.ident[sizeof(g_id.ident) - 1] = '\0';
-	g_id.ident_len = (uint16)strlen(g_id.ident);
+	FillPersona(g_id.persona, sizeof(g_id.persona), iniPath);
+	FillIdent(g_id.ident, sizeof(g_id.ident), &g_id.ident_len);
 
 	g_id.account_id = Vellum_AccountIdFromIdent(g_id.ident, g_id.ident_len);
 	g_id.app_id = ReadAppId(dir);

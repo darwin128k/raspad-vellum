@@ -44,7 +44,13 @@ if "%STANDALONE%"=="ON" if "%HL_DIR%"=="" (
 echo Unknown argument: %~1
 exit /b 1
 :args_done
-if "%STANDALONE%"=="ON" if "%HL_DIR%"=="" set "HL_DIR=%~dp0..\hl"
+if "%STANDALONE%"=="ON" if "%HL_DIR%"=="" (
+    if exist "%~dp0..\raspad-hl\src\launcher.cpp" (
+        set "HL_DIR=%~dp0..\raspad-hl"
+    ) else (
+        set "HL_DIR=%~dp0..\hl"
+    )
+)
 if "%STANDALONE%"=="ON" if "%METAHHOOK%"=="ON" (
     call "%HL_DIR%\prepare-metahook.bat"
     if errorlevel 1 exit /b 1
