@@ -1,0 +1,6 @@
+LIBRARY steamclient
+EXPORTS
+	CreateInterface
+	Steam_BGetCallback
+	Steam_FreeLastCallback
+	Steam_GetAPICallResult

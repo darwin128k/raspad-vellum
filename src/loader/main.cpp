@@ -236,7 +236,7 @@ static void AppendLaunchTail(char *cmd, size_t cmdSize, const char *procName)
  *
  * SteamAPI_Init then LoadLibrary's ActiveProcess\SteamClientDll and calls
  * CreateInterface("SteamClient012"). steam.dll does not implement that
- * interface; RevEmu's steamclient.dll does. */
+ * interface; this tree's steamclient.dll (Vellum) does. */
 static void WriteActiveProcess(DWORD pid, const char *steamClientDll)
 {
     HKEY key = NULL;

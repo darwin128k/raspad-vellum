@@ -69,34 +69,9 @@ if errorlevel 1 (
     exit /b 1
 )
 
-cd ..
-
-set ROOT=.\
-if exist ..\hw.dll (
-    set ROOT=..\
-) else if exist ..\..\hw.dll (
-    set ROOT=..\..\
-)
-set CSTRIKE_ORIG=orig\cstrike.exe
-set CSTRIKE_DST=%ROOT%cstrike.exe
-
-if not exist orig mkdir orig
-if not exist "%CSTRIKE_ORIG%" (
-    if exist "%CSTRIKE_DST%" (
-        echo Backing up current cstrike.exe to %CSTRIKE_ORIG%
-        copy /Y "%CSTRIKE_DST%" "%CSTRIKE_ORIG%" >nul
-    )
-)
-
-copy /Y build\cstrike.exe "%CSTRIKE_DST%" >nul
-if errorlevel 1 (
-    echo Built OK, but could not copy cstrike.exe to game root -- is the game running?
-    exit /b 1
-)
-
 if "%STANDALONE%"=="ON" (
-    echo Build OK: standalone cstrike.exe ^(GoldSrc in-process, hl from %HL_DIR%, REVLOADER_LAUNCHER_DLLS=%LAUNCHER_DLLS%, HL_METAHHOOK=%METAHHOOK%^)
+    echo Build OK: build\cstrike.exe build\steamclient.dll ^(standalone, hl from %HL_DIR%, REVLOADER_LAUNCHER_DLLS=%LAUNCHER_DLLS%, HL_METAHHOOK=%METAHHOOK%^)
 ) else (
-    echo Build OK: revloader cstrike.exe -^> game root ^(REVLOADER_LAUNCHER_DLLS=%LAUNCHER_DLLS%^)
+    echo Build OK: build\cstrike.exe build\steamclient.dll ^(REVLOADER_LAUNCHER_DLLS=%LAUNCHER_DLLS%^)
 )
 endlocal
