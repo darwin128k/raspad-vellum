@@ -64,6 +64,16 @@ struct CallbackMsg_t {
 	int m_cubParam;
 };
 
+enum { k_ESteamIPTypeIPv4 = 0 };
+
+struct SteamIPAddress_t {
+	union {
+		uint32 m_unIPv4;
+		uint8 m_rgubIPv6[16];
+	};
+	int32 m_eType;
+};
+
 struct FriendGameInfo_t {
 	CGameID m_gameID;
 	uint32 m_unGameIP;

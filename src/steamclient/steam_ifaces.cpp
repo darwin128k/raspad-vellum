@@ -654,6 +654,204 @@ static SteamRemoteStorage g_remote;
 static SteamScreenshots g_shots;
 static SteamUnifiedMessages g_unified;
 
+enum { k_iSteamUserCallbacks = 100 };
+enum { k_iSteamGameServerCallbacks = 200 };
+enum { k_iCallback_SteamServersConnected = k_iSteamUserCallbacks + 1 };
+enum { k_iCallback_GSPolicyResponse = k_iSteamUserCallbacks + 15 };
+enum { k_iCallback_GSClientApprove = k_iSteamGameServerCallbacks + 1 };
+enum { k_iCallback_ValidateAuthTicket = k_iSteamUserCallbacks + 43 };
+
+struct GSPolicyResponse_t {
+	uint8 m_bSecure;
+};
+
+struct GSClientApprove_t {
+	CSteamID m_SteamID;
+	CSteamID m_OwnerSteamID;
+};
+
+struct ValidateAuthTicketResponse_t {
+	CSteamID m_SteamID;
+	int m_eAuthSessionResponse;
+	CSteamID m_OwnerSteamID;
+};
+
+#define VELLUM_CB_QUEUE 8
+
+struct VellumQueuedCallback {
+	HSteamUser user;
+	int id;
+	int size;
+	uint8 data[256];
+};
+
+static VellumQueuedCallback g_cbq[VELLUM_CB_QUEUE];
+static int g_cbq_head;
+static int g_cbq_count;
+static VellumQueuedCallback g_cb_last;
+static int g_cb_have_last;
+static int g_gs_logged_on;
+static uint32 g_gs_bots;
+
+static void Vellum_QueueCallback(HSteamUser user, int id, const void *data, int size)
+{
+	VellumQueuedCallback *slot;
+	if (size < 0 || size > (int)sizeof(g_cbq[0].data)) {
+		return;
+	}
+	if (g_cbq_count >= VELLUM_CB_QUEUE) {
+		return;
+	}
+	slot = &g_cbq[(g_cbq_head + g_cbq_count) % VELLUM_CB_QUEUE];
+	slot->user = user;
+	slot->id = id;
+	slot->size = size;
+	if (size > 0 && data != NULL) {
+		memcpy(slot->data, data, (size_t)size);
+	}
+	g_cbq_count++;
+}
+
+static CSteamID Vellum_GameServerSteamId()
+{
+	return CSteamID(Vellum_GetIdentity().account_id, k_EUniversePublic, k_EAccountTypeGameServer);
+}
+
+static CSteamID Vellum_SteamIdFromAuthBlob(const void *blob, int len)
+{
+	if (blob != NULL && len == (int)sizeof(VellumTicket)) {
+		const VellumTicket *t = (const VellumTicket *)blob;
+		if (Vellum_TicketValid(t, (size_t)len)) {
+			return CSteamID(t->account_id, k_EUniversePublic, k_EAccountTypeIndividual);
+		}
+	}
+	return CSteamID(Vellum_GetIdentity().account_id ^ 0x10000u, k_EUniversePublic, k_EAccountTypeIndividual);
+}
+
+static void Vellum_QueueClientApprove(CSteamID sid)
+{
+	GSClientApprove_t a;
+	ValidateAuthTicketResponse_t v;
+	a.m_SteamID = sid;
+	a.m_OwnerSteamID = sid;
+	v.m_SteamID = sid;
+	v.m_eAuthSessionResponse = 0;
+	v.m_OwnerSteamID = sid;
+	Vellum_QueueCallback(1, k_iCallback_GSClientApprove, &a, (int)sizeof(a));
+	Vellum_QueueCallback(1, k_iCallback_ValidateAuthTicket, &v, (int)sizeof(v));
+}
+
+class SteamGameServerStats {
+public:
+	virtual SteamAPICall_t RequestUserStats(CSteamID) { return 0; }
+	virtual bool GetUserStat(CSteamID, const char *, int32 *) { return false; }
+	virtual bool GetUserStat(CSteamID, const char *, float *) { return false; }
+	virtual bool GetUserAchievement(CSteamID, const char *, bool *got)
+	{
+		if (got) *got = false;
+		return false;
+	}
+	virtual bool SetUserStat(CSteamID, const char *, int32) { return false; }
+	virtual bool SetUserStat(CSteamID, const char *, float) { return false; }
+	virtual bool UpdateUserAvgRateStat(CSteamID, const char *, float, double) { return false; }
+	virtual bool SetUserAchievement(CSteamID, const char *) { return false; }
+	virtual bool ClearUserAchievement(CSteamID, const char *) { return false; }
+	virtual SteamAPICall_t StoreUserStats(CSteamID) { return 0; }
+};
+
+class SteamGameServer {
+public:
+	virtual bool InitGameServer(uint32, uint16, uint16, uint32, AppId_t, const char *)
+	{
+		g_gs_logged_on = 1;
+		return true;
+	}
+	virtual void SetProduct(const char *) {}
+	virtual void SetGameDescription(const char *) {}
+	virtual void SetModDir(const char *) {}
+	virtual void SetDedicatedServer(bool) {}
+	virtual void LogOn(const char *)
+	{
+		LogOnAnonymous();
+	}
+	virtual void LogOnAnonymous()
+	{
+		GSPolicyResponse_t pol;
+		g_gs_logged_on = 1;
+		pol.m_bSecure = 0;
+		Vellum_QueueCallback(1, k_iCallback_SteamServersConnected, NULL, 0);
+		Vellum_QueueCallback(1, k_iCallback_GSPolicyResponse, &pol, (int)sizeof(pol));
+	}
+	virtual void LogOff() { g_gs_logged_on = 0; }
+	virtual bool BLoggedOn() { return g_gs_logged_on != 0; }
+	virtual bool BSecure() { return false; }
+	virtual CSteamID GetSteamID() { return Vellum_GameServerSteamId(); }
+	virtual bool WasRestartRequested() { return false; }
+	virtual void SetMaxPlayerCount(int) {}
+	virtual void SetBotPlayerCount(int) {}
+	virtual void SetServerName(const char *) {}
+	virtual void SetMapName(const char *) {}
+	virtual void SetPasswordProtected(bool) {}
+	virtual void SetSpectatorPort(uint16) {}
+	virtual void SetSpectatorServerName(const char *) {}
+	virtual void ClearAllKeyValues() {}
+	virtual void SetKeyValue(const char *, const char *) {}
+	virtual void SetGameTags(const char *) {}
+	virtual void SetGameData(const char *) {}
+	virtual void SetRegion(const char *) {}
+	virtual void SetAdvertiseServerActive(bool) {}
+	virtual HAuthTicket GetAuthSessionTicket(void *pTicket, int cbMaxTicket, uint32 *pcbTicket)
+	{
+		int n = Vellum_WriteAuthBlob(pTicket, cbMaxTicket);
+		if (pcbTicket) *pcbTicket = (uint32)n;
+		return n ? 1 : 0;
+	}
+	virtual int BeginAuthSession(const void *ticket, int size, CSteamID sid)
+	{
+		CSteamID use = sid;
+		if (use.ConvertToUint64() == 0) {
+			use = Vellum_SteamIdFromAuthBlob(ticket, size);
+		}
+		Vellum_QueueClientApprove(use);
+		return 0;
+	}
+	virtual void EndAuthSession(CSteamID) {}
+	virtual void CancelAuthTicket(HAuthTicket) {}
+	virtual int UserHasLicenseForApp(CSteamID, AppId_t) { return 0; }
+	virtual bool RequestUserGroupStatus(CSteamID, CSteamID) { return false; }
+	virtual void GetGameplayStats() {}
+	virtual SteamAPICall_t GetServerReputation() { return 0; }
+	virtual SteamIPAddress_t GetPublicIP()
+	{
+		SteamIPAddress_t ip;
+		memset(&ip, 0, sizeof(ip));
+		ip.m_eType = k_ESteamIPTypeIPv4;
+		return ip;
+	}
+	virtual bool HandleIncomingPacket(const void *, int, uint32, uint16) { return false; }
+	virtual int GetNextOutgoingPacket(void *, int, uint32 *, uint16 *) { return 0; }
+	virtual SteamAPICall_t AssociateWithClan(CSteamID) { return 0; }
+	virtual SteamAPICall_t ComputeNewPlayerCompatibility(CSteamID) { return 0; }
+	virtual bool SendUserConnectAndAuthenticate(uint32, const void *blob, uint32 size, CSteamID *outId)
+	{
+		CSteamID sid = Vellum_SteamIdFromAuthBlob(blob, (int)size);
+		if (outId) *outId = sid;
+		Vellum_QueueClientApprove(sid);
+		return true;
+	}
+	virtual CSteamID CreateUnauthenticatedUserConnection()
+	{
+		return CSteamID(++g_gs_bots | 0x70000000u, k_EUniversePublic, k_EAccountTypeIndividual);
+	}
+	virtual void SendUserDisconnect(CSteamID) {}
+	virtual bool BUpdateUserData(CSteamID, const char *, uint32) { return true; }
+	virtual void SetMasterServerHeartbeatInterval_DEPRECATED(int) {}
+	virtual void ForceMasterServerHeartbeat_DEPRECATED() {}
+};
+
+static SteamGameServer g_gameserver;
+static SteamGameServerStats g_gsstats;
+
 class SteamClient {
 public:
 	virtual HSteamPipe CreateSteamPipe() { return 1; }
@@ -666,7 +864,7 @@ public:
 	}
 	virtual void ReleaseUser(HSteamPipe, HSteamUser) {}
 	virtual void *GetISteamUser(HSteamUser, HSteamPipe, const char *) { return &g_user; }
-	virtual void *GetISteamGameServer(HSteamUser, HSteamPipe, const char *) { return NULL; }
+	virtual void *GetISteamGameServer(HSteamUser, HSteamPipe, const char *) { return &g_gameserver; }
 	virtual void SetLocalIPBinding(uint32, uint16) {}
 	virtual void *GetISteamFriends(HSteamUser, HSteamPipe, const char *) { return &g_friends; }
 	virtual void *GetISteamUtils(HSteamPipe, const char *) { return &g_utils; }
@@ -674,7 +872,7 @@ public:
 	virtual void *GetISteamMatchmakingServers(HSteamUser, HSteamPipe, const char *) { return &g_mms; }
 	virtual void *GetISteamGenericInterface(HSteamUser user, HSteamPipe pipe, const char *ver);
 	virtual void *GetISteamUserStats(HSteamUser, HSteamPipe, const char *) { return &g_stats; }
-	virtual void *GetISteamGameServerStats(HSteamUser, HSteamPipe, const char *) { return NULL; }
+	virtual void *GetISteamGameServerStats(HSteamUser, HSteamPipe, const char *) { return &g_gsstats; }
 	virtual void *GetISteamApps(HSteamUser, HSteamPipe, const char *) { return &g_apps; }
 	virtual void *GetISteamNetworking(HSteamUser, HSteamPipe, const char *) { return &g_net; }
 	virtual void *GetISteamRemoteStorage(HSteamUser, HSteamPipe, const char *) { return &g_remote; }
@@ -715,7 +913,7 @@ public:
 	}
 	virtual void ReleaseUser(HSteamPipe, HSteamUser) {}
 	virtual void *GetISteamUser(HSteamUser, HSteamPipe, const char *) { return &g_user023; }
-	virtual void *GetISteamGameServer(HSteamUser, HSteamPipe, const char *) { return NULL; }
+	virtual void *GetISteamGameServer(HSteamUser, HSteamPipe, const char *) { return &g_gameserver; }
 	virtual void SetLocalIPBinding(const void *, uint16) {}
 	virtual void *GetISteamFriends(HSteamUser, HSteamPipe, const char *) { return &g_friends017; }
 	virtual void *GetISteamUtils(HSteamPipe, const char *) { return &g_utils; }
@@ -723,7 +921,7 @@ public:
 	virtual void *GetISteamMatchmakingServers(HSteamUser, HSteamPipe, const char *) { return &g_mms; }
 	virtual void *GetISteamGenericInterface(HSteamUser user, HSteamPipe pipe, const char *ver);
 	virtual void *GetISteamUserStats(HSteamUser, HSteamPipe, const char *) { return &g_stats; }
-	virtual void *GetISteamGameServerStats(HSteamUser, HSteamPipe, const char *) { return NULL; }
+	virtual void *GetISteamGameServerStats(HSteamUser, HSteamPipe, const char *) { return &g_gsstats; }
 	virtual void *GetISteamApps(HSteamUser, HSteamPipe, const char *) { return &g_apps; }
 	virtual void *GetISteamNetworking(HSteamUser, HSteamPipe, const char *) { return &g_net; }
 	virtual void *GetISteamRemoteStorage(HSteamUser, HSteamPipe, const char *) { return &g_remote; }
@@ -770,6 +968,8 @@ void *SteamClient::GetISteamGenericInterface(HSteamUser user, HSteamPipe pipe, c
 	if (strncmp(ver, "STEAMSCREENSHOTS", 16) == 0) return GetISteamScreenshots(user, pipe, ver);
 	if (strncmp(ver, "STEAMHTTP", 9) == 0) return GetISteamHTTP(user, pipe, ver);
 	if (strncmp(ver, "STEAMUNIFIEDMESSAGES", 20) == 0) return GetISteamUnifiedMessages(user, pipe, ver);
+	if (strncmp(ver, "SteamGameServerStats", 20) == 0) return GetISteamGameServerStats(user, pipe, ver);
+	if (strncmp(ver, "SteamGameServer", 15) == 0) return GetISteamGameServer(user, pipe, ver);
 	return NULL;
 }
 
@@ -790,6 +990,8 @@ void *SteamClient020::GetISteamGenericInterface(HSteamUser user, HSteamPipe pipe
 	if (strncmp(ver, "STEAMSCREENSHOTS", 16) == 0) return GetISteamScreenshots(user, pipe, ver);
 	if (strncmp(ver, "STEAMHTTP", 9) == 0) return GetISteamHTTP(user, pipe, ver);
 	if (strncmp(ver, "STEAMUNIFIEDMESSAGES", 20) == 0) return DEPRECATED_GetISteamUnifiedMessages(user, pipe, ver);
+	if (strncmp(ver, "SteamGameServerStats", 20) == 0) return GetISteamGameServerStats(user, pipe, ver);
+	if (strncmp(ver, "SteamGameServer", 15) == 0) return GetISteamGameServer(user, pipe, ver);
 	return NULL;
 }
 
@@ -812,6 +1014,14 @@ STEAM_EXPORT void *STEAM_CALL CreateInterface(const char *pName, int *pReturnCod
 		if (pReturnCode) *pReturnCode = 0;
 		return &g_client020;
 	}
+	if (pName != NULL && (strcmp(pName, "SteamGameServer014") == 0 || strcmp(pName, "SteamGameServer015") == 0)) {
+		if (pReturnCode) *pReturnCode = 0;
+		return &g_gameserver;
+	}
+	if (pName != NULL && strcmp(pName, "SteamGameServerStats001") == 0) {
+		if (pReturnCode) *pReturnCode = 0;
+		return &g_gsstats;
+	}
 	if (pReturnCode) *pReturnCode = 1;
 	return NULL;
 }
@@ -821,12 +1031,26 @@ STEAM_EXPORT void *STEAM_CALL SteamInternal_CreateInterface(const char *pName)
 	return CreateInterface(pName, NULL);
 }
 
-STEAM_EXPORT bool STEAM_CALL Steam_BGetCallback(HSteamPipe, CallbackMsg_t *)
+STEAM_EXPORT bool STEAM_CALL Steam_BGetCallback(HSteamPipe, CallbackMsg_t *pCallback)
 {
-	return false;
+	if (pCallback == NULL || g_cbq_count <= 0) {
+		return false;
+	}
+	g_cb_last = g_cbq[g_cbq_head];
+	g_cbq_head = (g_cbq_head + 1) % VELLUM_CB_QUEUE;
+	g_cbq_count--;
+	g_cb_have_last = 1;
+	pCallback->m_hSteamUser = g_cb_last.user;
+	pCallback->m_iCallback = g_cb_last.id;
+	pCallback->m_pubParam = g_cb_last.data;
+	pCallback->m_cubParam = g_cb_last.size;
+	return true;
 }
 
-STEAM_EXPORT void STEAM_CALL Steam_FreeLastCallback(HSteamPipe) {}
+STEAM_EXPORT void STEAM_CALL Steam_FreeLastCallback(HSteamPipe)
+{
+	g_cb_have_last = 0;
+}
 
 STEAM_EXPORT bool STEAM_CALL Steam_GetAPICallResult(HSteamPipe, SteamAPICall_t, void *, int, int, bool *)
 {
