@@ -8,16 +8,15 @@
 #include "launcher.h"
 #endif
 
-/* Vellum loader for cstrike.exe. Default: set up Steam and CreateProcess
- * ProcName (hl.exe from raspad-hl). With REVLOADER_STANDALONE: same Steam
- * setup, then GoldSrc in this process via HlLauncher_Run (sources from
- * -DHL_DIR). With REVLOADER_LAUNCHER_DLLS, optional [Loader] Dlls= in
- * rev.ini is forwarded as repeated -dll flags. */
+/* Vellum loader: this process is Steam, then spawn hl.exe -game cstrike
+ * (or run GoldSrc here if REVLOADER_STANDALONE). No rev.ini, no steam.dll. */
 
 #define STEAM_IPC_MAPPING_NAME "Local\\SteamStart_SharedMemFile"
 #define STEAM_IPC_EVENT_NAME   "Local\\SteamStart_SharedMemLock"
 #define STEAM_IPC_SIZE         0x400
 #define ACTIVE_PROCESS_KEY     "Software\\Valve\\Steam\\ActiveProcess"
+#define LOADER_MUTEX_NAME      "Local\\Vellum_cstrike"
+#define DEFAULT_PROC           "hl.exe -game cstrike"
 
 struct SteamIpc {
     HANDLE mapping;
@@ -49,7 +48,7 @@ static void DirFromModulePath(char *dir, size_t dirSize)
     dir[dirSize - 1] = '\0';
     slash = strrchr(dir, '\\');
     if (slash != NULL) {
-        slash[1] = '\0'; /* keep trailing backslash, same as RevLoader */
+        slash[1] = '\0';
     }
 }
 
@@ -69,124 +68,6 @@ static void AppendArg(char *cmd, size_t cmdSize, const char *arg)
     _snprintf(cmd + n, cmdSize - n, "%s", arg);
     cmd[cmdSize - 1] = '\0';
 }
-
-#ifdef REVLOADER_LAUNCHER_DLLS
-static const char *SkipSpaces(const char *p)
-{
-    while (*p == ' ' || *p == '\t') {
-        p++;
-    }
-    return p;
-}
-
-static const char *NextToken(const char *p, char *out, size_t outSize)
-{
-    size_t n = 0;
-
-    p = SkipSpaces(p);
-    if (*p == '\0') {
-        out[0] = '\0';
-        return p;
-    }
-    if (*p == '"') {
-        p++;
-        while (*p != '\0' && *p != '"' && n + 1 < outSize) {
-            out[n++] = *p++;
-        }
-        if (*p == '"') {
-            p++;
-        }
-    } else {
-        while (*p != '\0' && *p != ' ' && *p != '\t' && n + 1 < outSize) {
-            out[n++] = *p++;
-        }
-    }
-    out[n] = '\0';
-    return p;
-}
-
-static int DllNameIsSafe(const char *name)
-{
-    size_t len;
-    const char *p;
-
-    if (name == NULL || name[0] == '\0') {
-        return 0;
-    }
-    for (p = name; *p != '\0'; p++) {
-        if (*p == '/' || *p == '\\' || *p == ':' || *p == '"' || *p == '\'') {
-            return 0;
-        }
-    }
-    if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0) {
-        return 0;
-    }
-    if (strstr(name, "..") != NULL) {
-        return 0;
-    }
-    len = strlen(name);
-    if (len < 5 || _stricmp(name + len - 4, ".dll") != 0) {
-        return 0;
-    }
-    return 1;
-}
-
-static int CmdlineHasDll(const char *cmd, const char *name)
-{
-    const char *p = cmd;
-    char tok[MAX_PATH];
-    char got[MAX_PATH];
-
-    while (*p != '\0') {
-        p = NextToken(p, tok, sizeof(tok));
-        if (tok[0] == '\0') {
-            break;
-        }
-        if (_stricmp(tok, "-dll") != 0) {
-            continue;
-        }
-        p = NextToken(p, got, sizeof(got));
-        if (_stricmp(got, name) == 0) {
-            return 1;
-        }
-    }
-    return 0;
-}
-
-static int AppendDllsFromIni(char *cmd, size_t cmdSize, const char *iniPath)
-{
-    char list[1024];
-    char name[MAX_PATH];
-    const char *p;
-    size_t n;
-
-    GetPrivateProfileStringA("Loader", "Dlls", "", list, sizeof(list), iniPath);
-    p = list;
-    for (;;) {
-        while (*p == ' ' || *p == '\t' || *p == ',' || *p == ';') {
-            p++;
-        }
-        if (*p == '\0') {
-            break;
-        }
-        n = 0;
-        while (*p != '\0' && *p != ' ' && *p != '\t' && *p != ',' && *p != ';' && n + 1 < sizeof(name)) {
-            name[n++] = *p++;
-        }
-        name[n] = '\0';
-        if (!DllNameIsSafe(name)) {
-            Fail("Invalid Dlls entry in rev.ini (basename only, .dll in the game folder).");
-            return 0;
-        }
-        if (CmdlineHasDll(cmd, name)) {
-            continue;
-        }
-        AppendArg(cmd, cmdSize, "-dll");
-        AppendArg(cmd, cmdSize, name);
-    }
-    return 1;
-}
-#endif
 
 static int HasArg(const char *cmd, const char *arg)
 {
@@ -234,9 +115,8 @@ static void AppendLaunchTail(char *cmd, size_t cmdSize, const char *procName)
  * CreateProcess races that. This process stays alive across WaitForSingleObject,
  * so our own pid is the stable "Steam is running" stand-in.
  *
- * SteamAPI_Init then LoadLibrary's ActiveProcess\SteamClientDll and calls
- * CreateInterface("SteamClient012"). steam.dll does not implement that
- * interface; this tree's steamclient.dll (Vellum) does. */
+ * SteamAPI_Init then LoadLibrary's ActiveProcess\\SteamClientDll and calls
+ * CreateInterface on this tree's steamclient.dll. */
 static void WriteActiveProcess(DWORD pid, const char *steamClientDll)
 {
     HKEY key = NULL;
@@ -380,14 +260,12 @@ static int RunChild(char *cmdLine)
 int WINAPI WinMain(HINSTANCE instance, HINSTANCE prev, LPSTR cmd, int show)
 {
     char dir[MAX_PATH];
-    char iniPath[MAX_PATH];
     char procName[1024];
     char extraArgs[1024];
     char appId[256];
-    char steamDll[MAX_PATH];
     char steamClient[MAX_PATH];
-    char iniClient[256];
     SteamIpc ipc;
+    HANDLE instanceMutex = NULL;
     int argc = 0;
     LPWSTR *argvW;
     int i;
@@ -399,12 +277,19 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE prev, LPSTR cmd, int show)
 
     DirFromModulePath(dir, sizeof(dir));
     SetCurrentDirectoryA(dir);
-    JoinPath(iniPath, sizeof(iniPath), dir, "rev.ini");
+
+#ifndef REVLOADER_STANDALONE
+    instanceMutex = CreateMutexA(NULL, FALSE, LOADER_MUTEX_NAME);
+    if (instanceMutex != NULL && GetLastError() == ERROR_ALREADY_EXISTS) {
+        Fail("Counter-Strike is already running.");
+        CloseHandle(instanceMutex);
+        return 1;
+    }
+#endif
 
     procName[0] = '\0';
     extraArgs[0] = '\0';
     appId[0] = '\0';
-    steamDll[0] = '\0';
     steamClient[0] = '\0';
 
     argvW = CommandLineToArgvW(GetCommandLineW(), &argc);
@@ -424,13 +309,8 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE prev, LPSTR cmd, int show)
     }
 
     if (procName[0] == '\0') {
-        GetPrivateProfileStringA("Loader", "ProcName", "", procName, sizeof(procName), iniPath);
-#ifndef REVLOADER_STANDALONE
-        if (procName[0] == '\0') {
-            Fail("ProcName value not found on command line or in rev.ini. Please edit the file.");
-            return 1;
-        }
-#endif
+        strncpy(procName, DEFAULT_PROC, sizeof(procName) - 1);
+        procName[sizeof(procName) - 1] = '\0';
     }
 
 #ifndef REVLOADER_STANDALONE
@@ -448,29 +328,12 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE prev, LPSTR cmd, int show)
     SetEnvironmentVariableA("SteamAppId", appId);
     WriteSteamAppId(dir, appId);
 
-    iniClient[0] = '\0';
-    GetPrivateProfileStringA("Loader", "SteamClientDll", "", iniClient, sizeof(iniClient), iniPath);
-    if (iniClient[0] != '\0') {
-        if (strchr(iniClient, '\\') != NULL || strchr(iniClient, '/') != NULL) {
-            strncpy(steamDll, iniClient, sizeof(steamDll) - 1);
-            steamDll[sizeof(steamDll) - 1] = '\0';
-        } else {
-            JoinPath(steamDll, sizeof(steamDll), dir, iniClient);
-        }
-    } else {
-        JoinPath(steamDll, sizeof(steamDll), dir, "steam.dll");
-    }
     JoinPath(steamClient, sizeof(steamClient), dir, "steamclient.dll");
 
     if (!SetupSteamIpc(&ipc)) {
-        return 1;
-    }
-
-    if (LoadLibraryA(steamDll) == NULL) {
-        char msg[512];
-        _snprintf(msg, sizeof(msg), "Can't find steam.dll relative to executable path %s", dir);
-        Fail(msg);
-        TeardownSteamIpc(&ipc);
+        if (instanceMutex) {
+            CloseHandle(instanceMutex);
+        }
         return 1;
     }
 
@@ -479,6 +342,9 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE prev, LPSTR cmd, int show)
         _snprintf(msg, sizeof(msg), "Can't find steamclient.dll relative to executable path %s", dir);
         Fail(msg);
         TeardownSteamIpc(&ipc);
+        if (instanceMutex) {
+            CloseHandle(instanceMutex);
+        }
         return 1;
     }
 
@@ -501,13 +367,6 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE prev, LPSTR cmd, int show)
         if (!HasArg(engineCmd, "-game")) {
             AppendArg(engineCmd, sizeof(engineCmd), "-game cstrike");
         }
-#ifdef REVLOADER_LAUNCHER_DLLS
-        if (!AppendDllsFromIni(engineCmd, sizeof(engineCmd), iniPath)) {
-            WriteSteamAppId(dir, appId);
-            TeardownSteamIpc(&ipc);
-            return 1;
-        }
-#endif
 
         /* If this process's own OS-level command line has no -game (the
          * normal case: user double-clicked cstrike.exe with no arguments),
@@ -544,27 +403,16 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE prev, LPSTR cmd, int show)
         return rc;
     }
 #else
-    if (procName[0] == '\0') {
-        Fail("ProcName value not found on command line or in rev.ini. Please edit the file.");
-        WriteSteamAppId(dir, appId);
-        TeardownSteamIpc(&ipc);
-        return 1;
-    }
-#ifdef REVLOADER_LAUNCHER_DLLS
-    if (!AppendDllsFromIni(procName, sizeof(procName), iniPath)) {
-        WriteSteamAppId(dir, appId);
-        TeardownSteamIpc(&ipc);
-        return 1;
-    }
-#endif
     if (!RunChild(procName)) {
         WriteSteamAppId(dir, appId);
         TeardownSteamIpc(&ipc);
+        CloseHandle(instanceMutex);
         return 1;
     }
 
     WriteSteamAppId(dir, appId);
     TeardownSteamIpc(&ipc);
+    CloseHandle(instanceMutex);
     return 0;
 #endif
 }

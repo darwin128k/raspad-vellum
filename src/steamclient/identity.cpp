@@ -7,7 +7,6 @@
 #ifdef _WIN32
 #include <windows.h>
 #else
-#include "ini.h"
 #include <pwd.h>
 #include <unistd.h>
 #endif
@@ -95,15 +94,12 @@ static uint32 ReadAppId(const char *dir)
 }
 
 #ifdef _WIN32
-static void FillPersona(char *persona, size_t personaSize, const char *iniPath)
+static void FillPersona(char *persona, size_t personaSize)
 {
-	GetPrivateProfileStringA("steamclient", "PlayerName", "", persona, (DWORD)personaSize, iniPath);
-	if (persona[0] == '\0') {
-		DWORD n = (DWORD)personaSize;
-		if (!GetUserNameA(persona, &n) || persona[0] == '\0') {
-			strncpy(persona, "Vellum", personaSize - 1);
-			persona[personaSize - 1] = '\0';
-		}
+	DWORD n = (DWORD)personaSize;
+	if (!GetUserNameA(persona, &n) || persona[0] == '\0') {
+		strncpy(persona, "Vellum", personaSize - 1);
+		persona[personaSize - 1] = '\0';
 	}
 }
 
@@ -123,18 +119,15 @@ static void FillIdent(char *ident, size_t identSize, uint16 *ident_len)
 	*ident_len = (uint16)strlen(ident);
 }
 #else
-static void FillPersona(char *persona, size_t personaSize, const char *iniPath)
+static void FillPersona(char *persona, size_t personaSize)
 {
-	Vellum_IniGet(iniPath, "steamclient", "PlayerName", persona, personaSize, "");
-	if (persona[0] == '\0') {
-		struct passwd *pw = getpwuid(getuid());
-		if (pw != NULL && pw->pw_name != NULL && pw->pw_name[0] != '\0') {
-			strncpy(persona, pw->pw_name, personaSize - 1);
-			persona[personaSize - 1] = '\0';
-		} else {
-			strncpy(persona, "Vellum", personaSize - 1);
-			persona[personaSize - 1] = '\0';
-		}
+	struct passwd *pw = getpwuid(getuid());
+	if (pw != NULL && pw->pw_name != NULL && pw->pw_name[0] != '\0') {
+		strncpy(persona, pw->pw_name, personaSize - 1);
+		persona[personaSize - 1] = '\0';
+	} else {
+		strncpy(persona, "Vellum", personaSize - 1);
+		persona[personaSize - 1] = '\0';
 	}
 }
 
@@ -205,10 +198,8 @@ void Vellum_InitIdentity()
 
 	char dir[MAX_PATH];
 	DirFromThisDll(dir, sizeof(dir));
-	char iniPath[MAX_PATH];
-	JoinPath(iniPath, sizeof(iniPath), dir, "rev.ini");
 
-	FillPersona(g_id.persona, sizeof(g_id.persona), iniPath);
+	FillPersona(g_id.persona, sizeof(g_id.persona));
 	FillIdent(g_id.ident, sizeof(g_id.ident), &g_id.ident_len);
 
 	g_id.account_id = Vellum_AccountIdFromIdent(g_id.ident, g_id.ident_len);

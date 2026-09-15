@@ -9,11 +9,9 @@ fi
 rm -f /tmp/vellum-m32-test
 
 STANDALONE=OFF
-LAUNCHER_DLLS=ON
 HL_DIR=""
 for arg in "$@"; do
     case "$arg" in
-        nodll) LAUNCHER_DLLS=OFF ;;
         standalone) STANDALONE=ON ;;
         metahook|nometahook)
             echo "metahook is Windows-only"
@@ -44,13 +42,13 @@ fi
 mkdir -p build-linux
 cd build-linux
 if [ "$STANDALONE" = ON ]; then
-    cmake -DCMAKE_BUILD_TYPE=Release -DREVLOADER_STANDALONE=ON -DREVLOADER_LAUNCHER_DLLS=$LAUNCHER_DLLS -DHL_DIR="$HL_DIR" ..
+    cmake -DCMAKE_BUILD_TYPE=Release -DREVLOADER_STANDALONE=ON -DHL_DIR="$HL_DIR" ..
 else
-    cmake -DCMAKE_BUILD_TYPE=Release -DREVLOADER_STANDALONE=OFF -DREVLOADER_LAUNCHER_DLLS=$LAUNCHER_DLLS ..
+    cmake -DCMAKE_BUILD_TYPE=Release -DREVLOADER_STANDALONE=OFF ..
 fi
 cmake --build .
 if [ "$STANDALONE" = ON ]; then
-    echo "Build OK: build-linux/cstrike_linux build-linux/steamclient.so (standalone, hl from $HL_DIR, REVLOADER_LAUNCHER_DLLS=$LAUNCHER_DLLS)"
+    echo "Build OK: build-linux/cstrike_linux build-linux/steamclient.so (standalone, hl from $HL_DIR)"
 else
-    echo "Build OK: build-linux/cstrike_linux build-linux/steamclient.so (REVLOADER_LAUNCHER_DLLS=$LAUNCHER_DLLS)"
+    echo "Build OK: build-linux/cstrike_linux build-linux/steamclient.so"
 fi

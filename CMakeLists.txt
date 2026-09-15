@@ -16,7 +16,6 @@ else()
 endif()
 
 option(REVLOADER_STANDALONE "Run GoldSrc in this process (compile hl launcher sources from raspad-hl) instead of spawning hl" OFF)
-option(REVLOADER_LAUNCHER_DLLS "Forward rev.ini [Loader] Dlls= as -dll flags" ON)
 option(HL_METAHHOOK "Embed MetaHookSv in the standalone launcher" OFF)
 set(HL_DIR "" CACHE PATH "Path to raspad-hl (required when REVLOADER_STANDALONE=ON)")
 set(METAHOOK_DIR "" CACHE PATH "Path to MetaHookSv (default: HL_DIR/../metahook)")

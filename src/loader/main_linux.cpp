@@ -1,4 +1,3 @@
-#include "ini.h"
 #ifdef REVLOADER_STANDALONE
 #include "launcher.h"
 #endif
@@ -21,7 +20,7 @@
  * Loader mode execs ProcName (default ./hl from raspad-hl). */
 
 #define DEFAULT_STEAM_APPID "10"
-#define DEFAULT_PROC        "./hl"
+#define DEFAULT_PROC        "./hl -game cstrike"
 
 static void Fail(const char *text)
 {
@@ -80,124 +79,6 @@ static void AppendArg(char *cmd, size_t cmdSize, const char *arg)
 	snprintf(cmd + n, cmdSize - n, "%s", arg);
 	cmd[cmdSize - 1] = '\0';
 }
-
-#ifdef REVLOADER_LAUNCHER_DLLS
-static const char *SkipSpaces(const char *p)
-{
-	while (*p == ' ' || *p == '\t') {
-		p++;
-	}
-	return p;
-}
-
-static const char *NextToken(const char *p, char *out, size_t outSize)
-{
-	size_t n = 0;
-
-	p = SkipSpaces(p);
-	if (*p == '\0') {
-		out[0] = '\0';
-		return p;
-	}
-	if (*p == '"') {
-		p++;
-		while (*p != '\0' && *p != '"' && n + 1 < outSize) {
-			out[n++] = *p++;
-		}
-		if (*p == '"') {
-			p++;
-		}
-	} else {
-		while (*p != '\0' && *p != ' ' && *p != '\t' && n + 1 < outSize) {
-			out[n++] = *p++;
-		}
-	}
-	out[n] = '\0';
-	return p;
-}
-
-static int SoNameIsSafe(const char *name)
-{
-	size_t len;
-	const char *p;
-
-	if (name == NULL || name[0] == '\0') {
-		return 0;
-	}
-	for (p = name; *p != '\0'; p++) {
-		if (*p == '/' || *p == '\\' || *p == ':' || *p == '"' || *p == '\'') {
-			return 0;
-		}
-	}
-	if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0) {
-		return 0;
-	}
-	if (strstr(name, "..") != NULL) {
-		return 0;
-	}
-	len = strlen(name);
-	if (len < 4 || strcmp(name + len - 3, ".so") != 0) {
-		return 0;
-	}
-	return 1;
-}
-
-static int CmdlineHasDll(const char *cmd, const char *name)
-{
-	const char *p = cmd;
-	char tok[512];
-	char got[512];
-
-	while (*p != '\0') {
-		p = NextToken(p, tok, sizeof(tok));
-		if (tok[0] == '\0') {
-			break;
-		}
-		if (strcmp(tok, "-dll") != 0) {
-			continue;
-		}
-		p = NextToken(p, got, sizeof(got));
-		if (strcmp(got, name) == 0) {
-			return 1;
-		}
-	}
-	return 0;
-}
-
-static int AppendDllsFromIni(char *cmd, size_t cmdSize, const char *iniPath)
-{
-	char list[1024];
-	char name[512];
-	const char *p;
-	size_t n;
-
-	Vellum_IniGet(iniPath, "Loader", "Dlls", list, sizeof(list), "");
-	p = list;
-	for (;;) {
-		while (*p == ' ' || *p == '\t' || *p == ',' || *p == ';') {
-			p++;
-		}
-		if (*p == '\0') {
-			break;
-		}
-		n = 0;
-		while (*p != '\0' && *p != ' ' && *p != '\t' && *p != ',' && *p != ';' && n + 1 < sizeof(name)) {
-			name[n++] = *p++;
-		}
-		name[n] = '\0';
-		if (!SoNameIsSafe(name)) {
-			Fail("Invalid Dlls entry in rev.ini (basename only, .so in the game folder).");
-			return 0;
-		}
-		if (CmdlineHasDll(cmd, name)) {
-			continue;
-		}
-		AppendArg(cmd, cmdSize, "-dll");
-		AppendArg(cmd, cmdSize, name);
-	}
-	return 1;
-}
-#endif
 
 static int HasArg(const char *cmd, const char *arg)
 {
@@ -575,12 +456,10 @@ static void EnsureSteamLooksRunning(void)
 int main(int argc, char **argv)
 {
 	char dir[4096];
-	char iniPath[4096];
 	char procName[1024];
 	char extraArgs[1024];
 	char appId[256];
 	char steamClient[4096];
-	char iniClient[256];
 	int i;
 
 	DirFromSelf(dir, sizeof(dir));
@@ -588,7 +467,6 @@ int main(int argc, char **argv)
 		Fail("Unable to chdir to the executable directory.");
 		return 1;
 	}
-	JoinPath(iniPath, sizeof(iniPath), dir, "rev.ini");
 
 	procName[0] = '\0';
 	extraArgs[0] = '\0';
@@ -608,11 +486,8 @@ int main(int argc, char **argv)
 	}
 
 	if (procName[0] == '\0') {
-		Vellum_IniGet(iniPath, "Loader", "ProcName", procName, sizeof(procName), "");
-		if (procName[0] == '\0') {
-			strncpy(procName, DEFAULT_PROC, sizeof(procName) - 1);
-			procName[sizeof(procName) - 1] = '\0';
-		}
+		strncpy(procName, DEFAULT_PROC, sizeof(procName) - 1);
+		procName[sizeof(procName) - 1] = '\0';
 	}
 
 #ifndef REVLOADER_STANDALONE
@@ -624,12 +499,6 @@ int main(int argc, char **argv)
 		AppendArg(procName, sizeof(procName), "-game");
 		AppendArg(procName, sizeof(procName), "cstrike");
 	}
-
-#ifdef REVLOADER_LAUNCHER_DLLS
-	if (!AppendDllsFromIni(procName, sizeof(procName), iniPath)) {
-		return 1;
-	}
-#endif
 #endif
 
 	if (appId[0] == '\0' && !ReadSteamAppId(dir, appId, sizeof(appId))) {
@@ -649,18 +518,7 @@ int main(int argc, char **argv)
 	}
 	WriteSteamAppId(dir, appId);
 
-	iniClient[0] = '\0';
-	Vellum_IniGet(iniPath, "Loader", "SteamClientDll", iniClient, sizeof(iniClient), "");
-	if (iniClient[0] != '\0') {
-		if (strchr(iniClient, '/') != NULL) {
-			strncpy(steamClient, iniClient, sizeof(steamClient) - 1);
-			steamClient[sizeof(steamClient) - 1] = '\0';
-		} else {
-			JoinPath(steamClient, sizeof(steamClient), dir, iniClient);
-		}
-	} else {
-		JoinPath(steamClient, sizeof(steamClient), dir, "steamclient.so");
-	}
+	JoinPath(steamClient, sizeof(steamClient), dir, "steamclient.so");
 
 	if (!FileReadable(steamClient)) {
 		char msg[512];
@@ -702,11 +560,6 @@ int main(int argc, char **argv)
 			AppendArg(engineCmd, sizeof(engineCmd), "-game");
 			AppendArg(engineCmd, sizeof(engineCmd), "cstrike");
 		}
-#ifdef REVLOADER_LAUNCHER_DLLS
-		if (!AppendDllsFromIni(engineCmd, sizeof(engineCmd), iniPath)) {
-			return 1;
-		}
-#endif
 		if (!ArgvHasToken(argc, argv, "-game")) {
 			char selfPath[4096];
 			char *nargv[64];

@@ -10,6 +10,10 @@ and Linux:
   and `SteamClient020` (Oct 2024 GoldSrc), plus a 64-byte Vellum auth blob. qproto
   classifies that blob as `CA_VELLUM`, distinct from RevEmu / SC2009 / OldRevEmu.
 
+No `rev.ini`, no `steam.dll`, no extra sidecar DLLs. Copy `cstrike.exe` and
+`steamclient.dll` next to `hl.exe` and run `cstrike.exe`. One loader instance at
+a time (CD-ROM style). Optional `-launch` / `-appid` on the command line.
+
 Does not know about mods, filesystem, or `hw`. That lives in
 [raspad-hl](https://github.com/darwin128k/raspad-hl): mutex, `FileSystem_Stdio`,
 `hw.dll` / `hw.so`, `IEngineAPI::Run`, optional `-dll` and MetaHook. Vellum
@@ -18,22 +22,20 @@ either spawns that `hl` binary (loader) or compiles `src/launcher.cpp` from
 
 ## Modes
 
-**Loader (default).** Steam environment in this process, then run `ProcName`
-from `rev.ini`. The loader pid stays the "live Steam".
+**Loader (default).** Steam environment in this process, then run `hl.exe -game cstrike`
+(Linux: `./hl -game cstrike`). The loader pid stays the "live Steam".
 
-- Windows: named mapping/event, registry `ActiveProcess`, `LoadLibrary(steam.dll)`,
-  `CreateProcess` on `ProcName` (usually `hl.exe -game cstrike`).
+- Windows: named mapping/event, registry `ActiveProcess`, `CreateProcess`.
 - Linux: `SteamAppId`, a private `$HOME/.steam/sdk32` that points at our
   `steamclient.so` (SteamAPI_Init ignores `LD_LIBRARY_PATH` and would otherwise
-  load Steam's copy), Steam Runtime i386 libs for CEF/GTK, then `exec`
-  `ProcName` (default `./hl_linux -game cstrike`).
+  load Steam's copy), Steam Runtime i386 libs for CEF/GTK, then `exec`.
 
 **Standalone.** Same Steam, then `HlLauncher_Run` from raspad-hl in the same
 process. A separate `hl` is not needed. MetaHook embed is Windows-only.
 
-Persona name is read from `rev.ini` `[steamclient] PlayerName=`. Identity for the
-ticket is hostname plus a machine serial (`COMPUTERNAME` and C: volume serial on
-Windows; `gethostname` and `/etc/machine-id` on Linux).
+Persona name is the OS user name. Identity for the ticket is hostname plus a
+machine serial (`COMPUTERNAME` and C: volume serial on Windows; `gethostname`
+and `/etc/machine-id` on Linux).
 
 ## Build
 
@@ -66,17 +68,7 @@ folder yourself.
 ```
 
 Result: `build-linux/cstrike_linux` and `build-linux/steamclient.so`. Copy both next to
-`hw.so`. Loader mode also needs `hl_linux` in that folder. Optional
-`rev.ini`:
-
-```ini
-[Loader]
-ProcName=./hl_linux -game cstrike
-[steamclient]
-PlayerName=YourName
-```
-
-If `ProcName` is omitted, the Linux loader defaults to `./hl_linux -game cstrike`.
+`hw.so`. Loader mode also needs `hl` in that folder.
 
 ## Run
 
