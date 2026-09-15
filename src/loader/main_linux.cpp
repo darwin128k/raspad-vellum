@@ -18,10 +18,10 @@
  * $HOME/.steam/sdk32/steamclient.so by absolute path (not LD_LIBRARY_PATH),
  * so we point HOME at a private .vellum-home that symlinks our steamclient.
  * LD_LIBRARY_PATH still has the game dir plus Steam Runtime i386 libs (GTK2/CEF).
- * Loader mode execs ProcName (default ./hl_linux). */
+ * Loader mode execs ProcName (default ./hl from raspad-hl). */
 
 #define DEFAULT_STEAM_APPID "10"
-#define DEFAULT_PROC        "./hl_linux"
+#define DEFAULT_PROC        "./hl"
 
 static void Fail(const char *text)
 {
