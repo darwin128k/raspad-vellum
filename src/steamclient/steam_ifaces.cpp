@@ -5,9 +5,10 @@
 #include <string.h>
 #include <time.h>
 
-/* Thin Steamworks facades for GoldSrc steam_api (SteamClient012 era).
- * Methods that the engine actually needs are real; the rest are no-ops with
- * the correct vtable slots so SteamAPI_Init can obtain every interface. */
+/* Thin Steamworks facades for GoldSrc steam_api.
+ * SteamClient012 is the 8684-era layout; SteamClient020 matches the Oct 2024
+ * (build 10211) libsteam_api. Methods the engine needs are real; the rest are
+ * no-ops with the correct vtable slots so SteamAPI_Init can obtain every iface. */
 
 class SteamUser {
 public:
@@ -56,6 +57,66 @@ public:
 	virtual bool GetEncryptedAppTicket(void *, int, uint32 *) { return false; }
 	virtual int GetGameBadgeLevel(int, bool) { return 0; }
 	virtual int GetPlayerSteamLevel() { return 1; }
+};
+
+/* SteamUser023: GetAuthTicketForWebApi sits after GetAuthSessionTicket, so this
+ * cannot share a vtable with the 8684 SteamUser above. */
+class SteamUser023 {
+public:
+	virtual HSteamUser GetHSteamUser() { return 1; }
+	virtual bool BLoggedOn() { return true; }
+	virtual CSteamID GetSteamID() { return Vellum_GetIdentity().steam_id; }
+	virtual int InitiateGameConnection_DEPRECATED(void *pAuthBlob, int cbMaxAuthBlob, CSteamID, uint32, uint16, bool)
+	{
+		return Vellum_WriteAuthBlob(pAuthBlob, cbMaxAuthBlob);
+	}
+	virtual void TerminateGameConnection_DEPRECATED(uint32, uint16) {}
+	virtual void TrackAppUsageEvent(CGameID, int, const char *) {}
+	virtual bool GetUserDataFolder(char *pchBuffer, int cubBuffer)
+	{
+		if (pchBuffer == NULL || cubBuffer <= 0) {
+			return false;
+		}
+		strncpy(pchBuffer, ".", (size_t)cubBuffer - 1);
+		pchBuffer[cubBuffer - 1] = '\0';
+		return true;
+	}
+	virtual void StartVoiceRecording() {}
+	virtual void StopVoiceRecording() {}
+	virtual int GetAvailableVoice(uint32 *pcbCompressed, uint32 *pcbUncompressed, uint32)
+	{
+		if (pcbCompressed) *pcbCompressed = 0;
+		if (pcbUncompressed) *pcbUncompressed = 0;
+		return 1;
+	}
+	virtual int GetVoice(bool, void *, uint32, uint32 *, bool, void *, uint32, uint32 *, uint32) { return 1; }
+	virtual int DecompressVoice(const void *, uint32, void *, uint32, uint32 *, uint32) { return 1; }
+	virtual uint32 GetVoiceOptimalSampleRate() { return 11025; }
+	virtual HAuthTicket GetAuthSessionTicket(void *pTicket, int cbMaxTicket, uint32 *pcbTicket, const void *)
+	{
+		int n = Vellum_WriteAuthBlob(pTicket, cbMaxTicket);
+		if (pcbTicket) *pcbTicket = (uint32)n;
+		return n ? 1 : 0;
+	}
+	virtual HAuthTicket GetAuthTicketForWebApi(const char *) { return 0; }
+	virtual int BeginAuthSession(const void *, int, CSteamID) { return 0; }
+	virtual void EndAuthSession(CSteamID) {}
+	virtual void CancelAuthTicket(HAuthTicket) {}
+	virtual int UserHasLicenseForApp(CSteamID, AppId_t) { return 0; }
+	virtual bool BIsBehindNAT() { return false; }
+	virtual void AdvertiseGame(CSteamID, uint32, uint16) {}
+	virtual SteamAPICall_t RequestEncryptedAppTicket(void *, int) { return 0; }
+	virtual bool GetEncryptedAppTicket(void *, int, uint32 *) { return false; }
+	virtual int GetGameBadgeLevel(int, bool) { return 0; }
+	virtual int GetPlayerSteamLevel() { return 1; }
+	virtual SteamAPICall_t RequestStoreAuthURL(const char *) { return 0; }
+	virtual bool BIsPhoneVerified() { return false; }
+	virtual bool BIsTwoFactorEnabled() { return false; }
+	virtual bool BIsPhoneIdentifying() { return false; }
+	virtual bool BIsPhoneRequiringVerification() { return false; }
+	virtual SteamAPICall_t GetMarketEligibility() { return 0; }
+	virtual SteamAPICall_t GetDurationControl() { return 0; }
+	virtual bool BSetDurationControlOnlineState(int) { return false; }
 };
 
 class SteamFriends {
@@ -126,6 +187,83 @@ public:
 	virtual SteamAPICall_t EnumerateFollowingList(uint32) { return 0; }
 };
 
+class SteamFriends017 {
+public:
+	virtual const char *GetPersonaName() { return Vellum_GetIdentity().persona; }
+	virtual SteamAPICall_t SetPersonaName(const char *) { return 0; }
+	virtual int GetPersonaState() { return 1; }
+	virtual int GetFriendCount(int) { return 0; }
+	virtual CSteamID GetFriendByIndex(int, int) { return CSteamID(); }
+	virtual int GetFriendRelationship(CSteamID) { return 0; }
+	virtual int GetFriendPersonaState(CSteamID) { return 0; }
+	virtual const char *GetFriendPersonaName(CSteamID) { return ""; }
+	virtual bool GetFriendGamePlayed(CSteamID, FriendGameInfo_t *) { return false; }
+	virtual const char *GetFriendPersonaNameHistory(CSteamID, int) { return ""; }
+	virtual int GetFriendSteamLevel(CSteamID) { return 1; }
+	virtual const char *GetPlayerNickname(CSteamID) { return ""; }
+	virtual int GetFriendsGroupCount() { return 0; }
+	virtual int16 GetFriendsGroupIDByIndex(int) { return -1; }
+	virtual const char *GetFriendsGroupName(int16) { return ""; }
+	virtual int GetFriendsGroupMembersCount(int16) { return 0; }
+	virtual void GetFriendsGroupMembersList(int16, CSteamID *, int) {}
+	virtual bool HasFriend(CSteamID, int) { return false; }
+	virtual int GetClanCount() { return 0; }
+	virtual CSteamID GetClanByIndex(int) { return CSteamID(); }
+	virtual const char *GetClanName(CSteamID) { return ""; }
+	virtual const char *GetClanTag(CSteamID) { return ""; }
+	virtual bool GetClanActivityCounts(CSteamID, int *, int *, int *) { return false; }
+	virtual SteamAPICall_t DownloadClanActivityCounts(CSteamID[], int) { return 0; }
+	virtual int GetFriendCountFromSource(CSteamID) { return 0; }
+	virtual CSteamID GetFriendFromSourceByIndex(CSteamID, int) { return CSteamID(); }
+	virtual bool IsUserInSource(CSteamID, CSteamID) { return false; }
+	virtual void SetInGameVoiceSpeaking(CSteamID, bool) {}
+	virtual void ActivateGameOverlay(const char *) {}
+	virtual void ActivateGameOverlayToUser(const char *, CSteamID) {}
+	virtual void ActivateGameOverlayToWebPage(const char *, int) {}
+	virtual void ActivateGameOverlayToStore(AppId_t, int) {}
+	virtual void SetPlayedWith(CSteamID) {}
+	virtual void ActivateGameOverlayInviteDialog(CSteamID) {}
+	virtual int GetSmallFriendAvatar(CSteamID) { return 0; }
+	virtual int GetMediumFriendAvatar(CSteamID) { return 0; }
+	virtual int GetLargeFriendAvatar(CSteamID) { return 0; }
+	virtual bool RequestUserInformation(CSteamID, bool) { return false; }
+	virtual SteamAPICall_t RequestClanOfficerList(CSteamID) { return 0; }
+	virtual CSteamID GetClanOwner(CSteamID) { return CSteamID(); }
+	virtual int GetClanOfficerCount(CSteamID) { return 0; }
+	virtual CSteamID GetClanOfficerByIndex(CSteamID, int) { return CSteamID(); }
+	virtual uint32 GetUserRestrictions() { return 0; }
+	virtual bool SetRichPresence(const char *, const char *) { return true; }
+	virtual void ClearRichPresence() {}
+	virtual const char *GetFriendRichPresence(CSteamID, const char *) { return ""; }
+	virtual int GetFriendRichPresenceKeyCount(CSteamID) { return 0; }
+	virtual const char *GetFriendRichPresenceKeyByIndex(CSteamID, int) { return ""; }
+	virtual void RequestFriendRichPresence(CSteamID) {}
+	virtual bool InviteUserToGame(CSteamID, const char *) { return false; }
+	virtual int GetCoplayFriendCount() { return 0; }
+	virtual CSteamID GetCoplayFriend(int) { return CSteamID(); }
+	virtual int GetFriendCoplayTime(CSteamID) { return 0; }
+	virtual AppId_t GetFriendCoplayGame(CSteamID) { return 0; }
+	virtual SteamAPICall_t JoinClanChatRoom(CSteamID) { return 0; }
+	virtual bool LeaveClanChatRoom(CSteamID) { return false; }
+	virtual int GetClanChatMemberCount(CSteamID) { return 0; }
+	virtual CSteamID GetChatMemberByIndex(CSteamID, int) { return CSteamID(); }
+	virtual bool SendClanChatMessage(CSteamID, const char *) { return false; }
+	virtual int GetClanChatMessage(CSteamID, int, void *, int, int *, CSteamID *) { return 0; }
+	virtual bool IsClanChatAdmin(CSteamID, CSteamID) { return false; }
+	virtual bool IsClanChatWindowOpenInSteam(CSteamID) { return false; }
+	virtual bool OpenClanChatWindowInSteam(CSteamID) { return false; }
+	virtual bool CloseClanChatWindowInSteam(CSteamID) { return false; }
+	virtual bool SetListenForFriendsMessages(bool) { return false; }
+	virtual bool ReplyToFriendMessage(CSteamID, const char *) { return false; }
+	virtual int GetFriendMessage(CSteamID, int, void *, int, int *) { return 0; }
+	virtual SteamAPICall_t GetFollowerCount(CSteamID) { return 0; }
+	virtual SteamAPICall_t IsFollowing(CSteamID) { return 0; }
+	virtual SteamAPICall_t EnumerateFollowingList(uint32) { return 0; }
+	virtual bool IsClanPublic(CSteamID) { return false; }
+	virtual bool IsClanOfficialGameGroup(CSteamID) { return false; }
+	virtual int GetNumChatsWithUnreadPriorityMessages() { return 0; }
+};
+
 class SteamUtils {
 public:
 	virtual uint32 GetSecondsSinceAppActive() { return 1; }
@@ -162,6 +300,31 @@ public:
 	virtual const char *GetSteamUILanguage() { return "english"; }
 	virtual bool IsSteamRunningInVR() { return false; }
 	virtual void SetOverlayNotificationInset(int32, int32) {}
+	virtual bool IsSteamInBigPictureMode() { return false; }
+	virtual void StartVRDashboard() {}
+	virtual bool IsVRHeadsetStreamingEnabled() { return false; }
+	virtual void SetVRHeadsetStreamingEnabled(bool) {}
+	virtual bool IsSteamChinaLauncher() { return false; }
+	virtual bool InitFilterText(uint32) { return false; }
+	virtual int FilterText(int, CSteamID, const char *in, char *out, uint32 outBytes)
+	{
+		if (out == NULL || outBytes == 0) {
+			return 0;
+		}
+		if (in == NULL) {
+			out[0] = '\0';
+			return 0;
+		}
+		strncpy(out, in, (size_t)outBytes - 1);
+		out[outBytes - 1] = '\0';
+		return 0;
+	}
+	virtual int GetIPv6ConnectivityState(int) { return 0; }
+	virtual bool IsSteamRunningOnSteamDeck() { return false; }
+	virtual bool ShowFloatingGamepadTextInput(int, int, int, int, int) { return false; }
+	virtual void SetGameLauncherMode(bool) {}
+	virtual bool DismissFloatingGamepadTextInput() { return false; }
+	virtual bool DismissGamepadTextInput() { return false; }
 };
 
 class SteamApps {
@@ -204,6 +367,30 @@ public:
 	virtual bool BIsAppInstalled(AppId_t) { return true; }
 	virtual CSteamID GetAppOwner() { return Vellum_GetIdentity().steam_id; }
 	virtual const char *GetLaunchQueryParam(const char *) { return ""; }
+	virtual bool GetDlcDownloadProgress(AppId_t, uint64 *dl, uint64 *total)
+	{
+		if (dl) *dl = 0;
+		if (total) *total = 0;
+		return false;
+	}
+	virtual int GetAppBuildId() { return 0; }
+	virtual void RequestAllProofOfPurchaseKeys() {}
+	virtual SteamAPICall_t GetFileDetails(const char *) { return 0; }
+	virtual int GetLaunchCommandLine(char *psz, int cub)
+	{
+		if (psz != NULL && cub > 0) {
+			psz[0] = '\0';
+		}
+		return 0;
+	}
+	virtual bool BIsSubscribedFromFamilySharing() { return false; }
+	virtual bool BIsTimedTrial(uint32 *allowed, uint32 *played)
+	{
+		if (allowed) *allowed = 0;
+		if (played) *played = 0;
+		return false;
+	}
+	virtual bool SetDlcContext(AppId_t) { return true; }
 };
 
 class SteamHTTP {
@@ -453,7 +640,9 @@ public:
 };
 
 static SteamUser g_user;
+static SteamUser023 g_user023;
 static SteamFriends g_friends;
+static SteamFriends017 g_friends017;
 static SteamUtils g_utils;
 static SteamApps g_apps;
 static SteamHTTP g_http;
@@ -500,6 +689,70 @@ public:
 	virtual void *GetISteamUGC(HSteamUser, HSteamPipe, const char *) { return NULL; }
 };
 
+class SteamClient017 : public SteamClient {
+public:
+	virtual void *GetISteamAppList(HSteamUser, HSteamPipe, const char *) { return NULL; }
+	virtual void *GetISteamMusic(HSteamUser, HSteamPipe, const char *) { return NULL; }
+	virtual void *GetISteamMusicRemote(HSteamUser, HSteamPipe, const char *) { return NULL; }
+	virtual void *GetISteamHTMLSurface(HSteamUser, HSteamPipe, const char *) { return NULL; }
+	virtual void DEPRECATED_Set_SteamAPI_CPostAPIResultInProcess(void (*)()) {}
+	virtual void DEPRECATED_Remove_SteamAPI_CPostAPIResultInProcess(void (*)()) {}
+	virtual void Set_SteamAPI_CCheckCallbackRegisteredInProcess(void *) {}
+	virtual void *GetISteamInventory(HSteamUser, HSteamPipe, const char *) { return NULL; }
+	virtual void *GetISteamVideo(HSteamUser, HSteamPipe, const char *) { return NULL; }
+	virtual void *GetISteamParentalSettings(HSteamUser, HSteamPipe, const char *) { return NULL; }
+};
+
+class SteamClient020 {
+public:
+	virtual HSteamPipe CreateSteamPipe() { return 1; }
+	virtual bool BReleaseSteamPipe(HSteamPipe) { return true; }
+	virtual HSteamUser ConnectToGlobalUser(HSteamPipe) { return 1; }
+	virtual HSteamUser CreateLocalUser(HSteamPipe *phSteamPipe, int)
+	{
+		if (phSteamPipe) *phSteamPipe = 1;
+		return 1;
+	}
+	virtual void ReleaseUser(HSteamPipe, HSteamUser) {}
+	virtual void *GetISteamUser(HSteamUser, HSteamPipe, const char *) { return &g_user023; }
+	virtual void *GetISteamGameServer(HSteamUser, HSteamPipe, const char *) { return NULL; }
+	virtual void SetLocalIPBinding(const void *, uint16) {}
+	virtual void *GetISteamFriends(HSteamUser, HSteamPipe, const char *) { return &g_friends017; }
+	virtual void *GetISteamUtils(HSteamPipe, const char *) { return &g_utils; }
+	virtual void *GetISteamMatchmaking(HSteamUser, HSteamPipe, const char *) { return &g_mm; }
+	virtual void *GetISteamMatchmakingServers(HSteamUser, HSteamPipe, const char *) { return &g_mms; }
+	virtual void *GetISteamGenericInterface(HSteamUser user, HSteamPipe pipe, const char *ver);
+	virtual void *GetISteamUserStats(HSteamUser, HSteamPipe, const char *) { return &g_stats; }
+	virtual void *GetISteamGameServerStats(HSteamUser, HSteamPipe, const char *) { return NULL; }
+	virtual void *GetISteamApps(HSteamUser, HSteamPipe, const char *) { return &g_apps; }
+	virtual void *GetISteamNetworking(HSteamUser, HSteamPipe, const char *) { return &g_net; }
+	virtual void *GetISteamRemoteStorage(HSteamUser, HSteamPipe, const char *) { return &g_remote; }
+	virtual void *GetISteamScreenshots(HSteamUser, HSteamPipe, const char *) { return &g_shots; }
+	virtual void *GetISteamGameSearch(HSteamUser, HSteamPipe, const char *) { return NULL; }
+	virtual void RunFrame() {}
+	virtual uint32 GetIPCCallCount() { return 0; }
+	virtual void SetWarningMessageHook(SteamAPIWarningMessageHook_t) {}
+	virtual bool BShutdownIfAllPipesClosed() { return true; }
+	virtual void *GetISteamHTTP(HSteamUser, HSteamPipe, const char *) { return &g_http; }
+	virtual void *DEPRECATED_GetISteamUnifiedMessages(HSteamUser, HSteamPipe, const char *) { return &g_unified; }
+	virtual void *GetISteamController(HSteamUser, HSteamPipe, const char *) { return NULL; }
+	virtual void *GetISteamUGC(HSteamUser, HSteamPipe, const char *) { return NULL; }
+	virtual void *GetISteamAppList(HSteamUser, HSteamPipe, const char *) { return NULL; }
+	virtual void *GetISteamMusic(HSteamUser, HSteamPipe, const char *) { return NULL; }
+	virtual void *GetISteamMusicRemote(HSteamUser, HSteamPipe, const char *) { return NULL; }
+	virtual void *GetISteamHTMLSurface(HSteamUser, HSteamPipe, const char *) { return NULL; }
+	virtual void DEPRECATED_Set_SteamAPI_CPostAPIResultInProcess(void (*)()) {}
+	virtual void DEPRECATED_Remove_SteamAPI_CPostAPIResultInProcess(void (*)()) {}
+	virtual void Set_SteamAPI_CCheckCallbackRegisteredInProcess(void *) {}
+	virtual void *GetISteamInventory(HSteamUser, HSteamPipe, const char *) { return NULL; }
+	virtual void *GetISteamVideo(HSteamUser, HSteamPipe, const char *) { return NULL; }
+	virtual void *GetISteamParentalSettings(HSteamUser, HSteamPipe, const char *) { return NULL; }
+	virtual void *GetISteamInput(HSteamUser, HSteamPipe, const char *) { return NULL; }
+	virtual void *GetISteamParties(HSteamUser, HSteamPipe, const char *) { return NULL; }
+	virtual void *GetISteamRemotePlay(HSteamUser, HSteamPipe, const char *) { return NULL; }
+	virtual void DestroyAllInterfaces() {}
+};
+
 void *SteamClient::GetISteamGenericInterface(HSteamUser user, HSteamPipe pipe, const char *ver)
 {
 	if (ver == NULL) {
@@ -520,7 +773,29 @@ void *SteamClient::GetISteamGenericInterface(HSteamUser user, HSteamPipe pipe, c
 	return NULL;
 }
 
+void *SteamClient020::GetISteamGenericInterface(HSteamUser user, HSteamPipe pipe, const char *ver)
+{
+	if (ver == NULL) {
+		return NULL;
+	}
+	if (strncmp(ver, "SteamUser", 9) == 0) return GetISteamUser(user, pipe, ver);
+	if (strncmp(ver, "SteamFriends", 12) == 0) return GetISteamFriends(user, pipe, ver);
+	if (strncmp(ver, "SteamUtils", 10) == 0) return GetISteamUtils(pipe, ver);
+	if (strncmp(ver, "SteamMatchMakingServers", 23) == 0) return GetISteamMatchmakingServers(user, pipe, ver);
+	if (strncmp(ver, "SteamMatchMaking", 16) == 0) return GetISteamMatchmaking(user, pipe, ver);
+	if (strncmp(ver, "STEAMUSERSTATS", 14) == 0) return GetISteamUserStats(user, pipe, ver);
+	if (strncmp(ver, "STEAMAPPS", 9) == 0) return GetISteamApps(user, pipe, ver);
+	if (strncmp(ver, "SteamNetworking", 15) == 0) return GetISteamNetworking(user, pipe, ver);
+	if (strncmp(ver, "STEAMREMOTESTORAGE", 18) == 0) return GetISteamRemoteStorage(user, pipe, ver);
+	if (strncmp(ver, "STEAMSCREENSHOTS", 16) == 0) return GetISteamScreenshots(user, pipe, ver);
+	if (strncmp(ver, "STEAMHTTP", 9) == 0) return GetISteamHTTP(user, pipe, ver);
+	if (strncmp(ver, "STEAMUNIFIEDMESSAGES", 20) == 0) return DEPRECATED_GetISteamUnifiedMessages(user, pipe, ver);
+	return NULL;
+}
+
 static SteamClient g_client;
+static SteamClient017 g_client017;
+static SteamClient020 g_client020;
 
 STEAM_EXPORT void *STEAM_CALL CreateInterface(const char *pName, int *pReturnCode)
 {
@@ -529,8 +804,21 @@ STEAM_EXPORT void *STEAM_CALL CreateInterface(const char *pName, int *pReturnCod
 		if (pReturnCode) *pReturnCode = 0;
 		return &g_client;
 	}
+	if (pName != NULL && strcmp(pName, "SteamClient017") == 0) {
+		if (pReturnCode) *pReturnCode = 0;
+		return &g_client017;
+	}
+	if (pName != NULL && strcmp(pName, "SteamClient020") == 0) {
+		if (pReturnCode) *pReturnCode = 0;
+		return &g_client020;
+	}
 	if (pReturnCode) *pReturnCode = 1;
 	return NULL;
+}
+
+STEAM_EXPORT void *STEAM_CALL SteamInternal_CreateInterface(const char *pName)
+{
+	return CreateInterface(pName, NULL);
 }
 
 STEAM_EXPORT bool STEAM_CALL Steam_BGetCallback(HSteamPipe, CallbackMsg_t *)

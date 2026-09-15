@@ -50,7 +50,7 @@ else
 fi
 cmake --build .
 if [ "$STANDALONE" = ON ]; then
-    echo "Build OK: build-linux/cstrike build-linux/steamclient.so (standalone, hl from $HL_DIR, REVLOADER_LAUNCHER_DLLS=$LAUNCHER_DLLS)"
+    echo "Build OK: build-linux/cstrike_linux build-linux/steamclient.so (standalone, hl from $HL_DIR, REVLOADER_LAUNCHER_DLLS=$LAUNCHER_DLLS)"
 else
-    echo "Build OK: build-linux/cstrike build-linux/steamclient.so (REVLOADER_LAUNCHER_DLLS=$LAUNCHER_DLLS)"
+    echo "Build OK: build-linux/cstrike_linux build-linux/steamclient.so (REVLOADER_LAUNCHER_DLLS=$LAUNCHER_DLLS)"
 fi

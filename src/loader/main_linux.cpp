@@ -4,21 +4,24 @@
 #endif
 
 #include <errno.h>
+#include <locale.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/wait.h>
 #include <signal.h>
 #include <unistd.h>
 
-/* Vellum loader for native Linux GoldSrc. Sets SteamAppId / LD_LIBRARY_PATH so
- * steam_api.so dlopens our steamclient.so (CreateInterface SteamClient012).
- * Loader mode execs ProcName (default ./hl from raspad-hl). Standalone compiles
- * raspad-hl's HlLauncher_Run into this process (hw.so), same as Windows. */
+/* Vellum loader for native Linux GoldSrc. SteamAPI_Init dlopens
+ * $HOME/.steam/sdk32/steamclient.so by absolute path (not LD_LIBRARY_PATH),
+ * so we point HOME at a private .vellum-home that symlinks our steamclient.
+ * LD_LIBRARY_PATH still has the game dir plus Steam Runtime i386 libs (GTK2/CEF).
+ * Loader mode execs ProcName (default ./hl_linux). */
 
 #define DEFAULT_STEAM_APPID "10"
-#define DEFAULT_PROC        "./hl"
+#define DEFAULT_PROC        "./hl_linux"
 
 static void Fail(const char *text)
 {
@@ -300,7 +303,182 @@ static int FileReadable(const char *path)
 	return access(path, R_OK) == 0;
 }
 
-static void PrependLdLibraryPath(const char *dir)
+static int EnsureDir(const char *path)
+{
+	if (mkdir(path, 0755) == 0 || errno == EEXIST) {
+		return 1;
+	}
+	return 0;
+}
+
+static int LinkOver(const char *target, const char *linkPath)
+{
+	unlink(linkPath);
+	if (symlink(target, linkPath) != 0) {
+		return 0;
+	}
+	return 1;
+}
+
+/* GoldSrc calls setlocale("en_US.UTF-8"). Debian often only has C.utf8 / ru_RU.utf8. */
+static int LocaleDirReady(const char *path)
+{
+	char marker[4096];
+	JoinPath(marker, sizeof(marker), path, "LC_CTYPE");
+	return access(marker, R_OK) == 0;
+}
+
+static void EnsureEnUsUtf8(const char *vellumHome)
+{
+	char locRoot[4096];
+	char locDir[4096];
+	pid_t pid;
+	int status;
+
+	if (setlocale(LC_ALL, "en_US.UTF-8") != NULL) {
+		setenv("LANG", "en_US.UTF-8", 1);
+		setenv("LC_ALL", "en_US.UTF-8", 1);
+		return;
+	}
+
+	JoinPath(locRoot, sizeof(locRoot), vellumHome, "locale");
+	if (!EnsureDir(locRoot)) {
+		return;
+	}
+	JoinPath(locDir, sizeof(locDir), locRoot, "en_US.UTF-8");
+	if (!LocaleDirReady(locDir)) {
+		pid = fork();
+		if (pid == 0) {
+			execlp("localedef", "localedef", "-c", "-f", "UTF-8", "-i", "en_US",
+			       "--no-archive", locDir, (char *)NULL);
+			_exit(127);
+		}
+		if (pid > 0) {
+			waitpid(pid, &status, 0);
+		}
+	}
+	if (LocaleDirReady(locDir)) {
+		setenv("LOCPATH", locRoot, 1);
+		setenv("LANG", "en_US.UTF-8", 1);
+		setenv("LC_ALL", "en_US.UTF-8", 1);
+	}
+}
+
+static void AppendDirIfExists(char *val, size_t valSize, const char *path)
+{
+	size_t n;
+
+	if (path == NULL || path[0] == '\0' || access(path, R_OK) != 0) {
+		return;
+	}
+	n = strlen(val);
+	if (n > 0 && n + 1 < valSize) {
+		val[n++] = ':';
+		val[n] = '\0';
+	}
+	snprintf(val + n, valSize - n, "%s", path);
+	val[valSize - 1] = '\0';
+}
+
+static void AppendSteamRuntimeI386(char *val, size_t valSize, const char *realHome)
+{
+	static const char *kRel[] = {
+		".local/share/Steam/ubuntu12_32/steam-runtime/pinned_libs_32",
+		".local/share/Steam/ubuntu12_32/steam-runtime/lib/i386-linux-gnu",
+		".local/share/Steam/ubuntu12_32/steam-runtime/usr/lib/i386-linux-gnu",
+		".steam/steam/ubuntu12_32/steam-runtime/pinned_libs_32",
+		".steam/steam/ubuntu12_32/steam-runtime/lib/i386-linux-gnu",
+		".steam/steam/ubuntu12_32/steam-runtime/usr/lib/i386-linux-gnu",
+		NULL
+	};
+	char path[4096];
+	int i;
+
+	if (realHome == NULL || realHome[0] == '\0') {
+		return;
+	}
+	for (i = 0; kRel[i] != NULL; i++) {
+		snprintf(path, sizeof(path), "%s/%s", realHome, kRel[i]);
+		path[sizeof(path) - 1] = '\0';
+		AppendDirIfExists(val, valSize, path);
+	}
+}
+
+static void KeepRealHomeXdg(const char *realHome)
+{
+	char path[4096];
+
+	if (realHome == NULL || realHome[0] == '\0') {
+		return;
+	}
+	if (getenv("XDG_DATA_HOME") == NULL) {
+		snprintf(path, sizeof(path), "%s/.local/share", realHome);
+		path[sizeof(path) - 1] = '\0';
+		setenv("XDG_DATA_HOME", path, 0);
+	}
+	if (getenv("XDG_CONFIG_HOME") == NULL) {
+		snprintf(path, sizeof(path), "%s/.config", realHome);
+		path[sizeof(path) - 1] = '\0';
+		setenv("XDG_CONFIG_HOME", path, 0);
+	}
+	if (getenv("XDG_CACHE_HOME") == NULL) {
+		snprintf(path, sizeof(path), "%s/.cache", realHome);
+		path[sizeof(path) - 1] = '\0';
+		setenv("XDG_CACHE_HOME", path, 0);
+	}
+}
+
+/* libsteam_api dlopens $HOME/.steam/sdk32/steamclient.so by absolute path.
+ * Point HOME at a private tree so that is our steamclient, not Steam's. */
+static int BindVellumSteamHome(const char *gameDir, const char *steamClient, char *homeOut, size_t homeSize)
+{
+	char steamDir[4096];
+	char sdk32[4096];
+	char bin32[4096];
+	char steamRoot[4096];
+	char linux32[4096];
+	char linkPath[4096];
+	char absClient[4096];
+
+	if (steamClient[0] == '/') {
+		strncpy(absClient, steamClient, sizeof(absClient) - 1);
+		absClient[sizeof(absClient) - 1] = '\0';
+	} else {
+		JoinPath(absClient, sizeof(absClient), gameDir, steamClient);
+	}
+
+	JoinPath(homeOut, homeSize, gameDir, ".vellum-home");
+	StripTrailingSlash(homeOut);
+	if (!EnsureDir(homeOut)) {
+		return 0;
+	}
+	JoinPath(steamDir, sizeof(steamDir), homeOut, ".steam");
+	if (!EnsureDir(steamDir)) {
+		return 0;
+	}
+	JoinPath(sdk32, sizeof(sdk32), steamDir, "sdk32");
+	JoinPath(bin32, sizeof(bin32), steamDir, "bin32");
+	JoinPath(steamRoot, sizeof(steamRoot), steamDir, "steam");
+	JoinPath(linux32, sizeof(linux32), steamRoot, "linux32");
+	if (!EnsureDir(sdk32) || !EnsureDir(bin32) || !EnsureDir(steamRoot) || !EnsureDir(linux32)) {
+		return 0;
+	}
+	JoinPath(linkPath, sizeof(linkPath), sdk32, "steamclient.so");
+	if (!LinkOver(absClient, linkPath)) {
+		return 0;
+	}
+	JoinPath(linkPath, sizeof(linkPath), bin32, "steamclient.so");
+	if (!LinkOver(absClient, linkPath)) {
+		return 0;
+	}
+	JoinPath(linkPath, sizeof(linkPath), linux32, "steamclient.so");
+	if (!LinkOver(absClient, linkPath)) {
+		return 0;
+	}
+	return 1;
+}
+
+static void PrependLdLibraryPath(const char *dir, const char *realHome)
 {
 	char clean[4096];
 	char val[8192];
@@ -321,6 +499,7 @@ static void PrependLdLibraryPath(const char *dir)
 		snprintf(val, sizeof(val), "%s", clean);
 	}
 	val[sizeof(val) - 1] = '\0';
+	AppendSteamRuntimeI386(val, sizeof(val), realHome);
 	setenv("LD_LIBRARY_PATH", val, 1);
 }
 
@@ -490,7 +669,25 @@ int main(int argc, char **argv)
 		return 1;
 	}
 
-	PrependLdLibraryPath(dir);
+	{
+		const char *realHome = getenv("HOME");
+		char vellumHome[4096];
+		char realHomeBuf[4096];
+
+		realHomeBuf[0] = '\0';
+		if (realHome != NULL && realHome[0] != '\0') {
+			strncpy(realHomeBuf, realHome, sizeof(realHomeBuf) - 1);
+			realHomeBuf[sizeof(realHomeBuf) - 1] = '\0';
+		}
+		KeepRealHomeXdg(realHomeBuf);
+		if (!BindVellumSteamHome(dir, steamClient, vellumHome, sizeof(vellumHome))) {
+			Fail("Unable to bind a private $HOME/.steam for steamclient.so.");
+			return 1;
+		}
+		setenv("HOME", vellumHome, 1);
+		EnsureEnUsUtf8(vellumHome);
+		PrependLdLibraryPath(dir, realHomeBuf);
+	}
 	EnsureSteamLooksRunning();
 
 #ifdef REVLOADER_STANDALONE

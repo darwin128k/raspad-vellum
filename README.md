@@ -3,10 +3,11 @@
 GoldSrc loader and steamclient for the Raspad stack. Two CMake targets, Windows
 and Linux:
 
-- **loader** (`cstrike.exe` / `cstrike`) — stand in for Steam, then launch the
+- **loader** (`cstrike.exe` / `cstrike_linux`) — stand in for Steam, then launch the
   engine.
 - **steamclient** (`steamclient.dll` / `steamclient.so`) —
-  `CreateInterface("SteamClient012")` and a 64-byte Vellum auth blob. qproto
+  `CreateInterface` / `SteamInternal_CreateInterface` for `SteamClient012` (8684)
+  and `SteamClient020` (Oct 2024 GoldSrc), plus a 64-byte Vellum auth blob. qproto
   classifies that blob as `CA_VELLUM`, distinct from RevEmu / SC2009 / OldRevEmu.
 
 Does not know about mods, filesystem, or `hw`. That lives in
@@ -22,9 +23,10 @@ from `rev.ini`. The loader pid stays the "live Steam".
 
 - Windows: named mapping/event, registry `ActiveProcess`, `LoadLibrary(steam.dll)`,
   `CreateProcess` on `ProcName` (usually `hl.exe -game cstrike`).
-- Linux: `SteamAppId`, `LD_LIBRARY_PATH` so `steam_api.so` finds our
-  `steamclient.so`, `~/.steam/steam.pid` if Steam is not already running, then
-  `exec` `ProcName` (default `./hl -game cstrike`).
+- Linux: `SteamAppId`, a private `$HOME/.steam/sdk32` that points at our
+  `steamclient.so` (SteamAPI_Init ignores `LD_LIBRARY_PATH` and would otherwise
+  load Steam's copy), Steam Runtime i386 libs for CEF/GTK, then `exec`
+  `ProcName` (default `./hl_linux -game cstrike`).
 
 **Standalone.** Same Steam, then `HlLauncher_Run` from raspad-hl in the same
 process. A separate `hl` is not needed. MetaHook embed is Windows-only.
@@ -63,18 +65,18 @@ folder yourself.
 ./build.sh standalone ../raspad-hl
 ```
 
-Result: `build-linux/cstrike` and `build-linux/steamclient.so`. Copy both next to
-`hw.so`. Loader mode also needs `hl` from raspad-hl in that folder. Optional
+Result: `build-linux/cstrike_linux` and `build-linux/steamclient.so`. Copy both next to
+`hw.so`. Loader mode also needs `hl_linux` in that folder. Optional
 `rev.ini`:
 
 ```ini
 [Loader]
-ProcName=./hl -game cstrike
+ProcName=./hl_linux -game cstrike
 [steamclient]
 PlayerName=YourName
 ```
 
-If `ProcName` is omitted, the Linux loader defaults to `./hl -game cstrike`.
+If `ProcName` is omitted, the Linux loader defaults to `./hl_linux -game cstrike`.
 
 ## Run
 
@@ -87,8 +89,8 @@ cstrike.exe
 Linux:
 
 ```sh
-chmod +x cstrike
-./cstrike
+chmod +x cstrike_linux
+./cstrike_linux
 ```
 
 ## License
