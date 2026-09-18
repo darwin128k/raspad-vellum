@@ -48,7 +48,7 @@ endif()
 
 if(VELLUM_NO_SERVER_BROWSER)
     target_compile_definitions(steamclient PRIVATE VELLUM_NO_SERVER_BROWSER)
-    message(STATUS "vellum: Internet server browser disabled (no master.vdf)")
+    message(STATUS "vellum: Internet server browser disabled (no masterserver.vdf)")
 endif()
 
 set_target_properties(steamclient PROPERTIES

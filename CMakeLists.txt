@@ -17,7 +17,7 @@ endif()
 
 option(REVLOADER_STANDALONE "Run GoldSrc in this process (compile hl launcher sources from raspad-hl) instead of spawning hl" OFF)
 option(HL_METAHHOOK "Embed MetaHookSv in the standalone launcher" OFF)
-option(VELLUM_NO_SERVER_BROWSER "Do not read config/master.vdf; Internet server search stays empty" OFF)
+option(VELLUM_NO_SERVER_BROWSER "Do not read config/masterserver.vdf; Internet server search stays empty" OFF)
 set(HL_DIR "" CACHE PATH "Path to raspad-hl (required when REVLOADER_STANDALONE=ON)")
 set(METAHOOK_DIR "" CACHE PATH "Path to MetaHookSv (default: HL_DIR/../metahook)")
 
