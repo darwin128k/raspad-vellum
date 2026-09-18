@@ -46,7 +46,14 @@ Written next to the game / `steamclient` binary.
 
 ### Windows
 
-MSVC x86. Opus is fetched and linked statically.
+Needs:
+
+- Visual Studio 2022 with the **Desktop development with C++** workload and the **MSVC x86** toolset (`vcvars32.bat` — `build.bat` looks under Enterprise by default)
+- [CMake](https://cmake.org/) 3.16+
+- [Ninja](https://ninja-build.org/) on `PATH`
+- Git (CMake FetchContent clones Opus)
+
+Opus is fetched and linked statically. WinINet / WinMM come with the Windows SDK.
 
 ```bat
 build.bat
@@ -62,9 +69,28 @@ build.bat standalone D:\src\raspad-hl
 
 Output: `build\cstrike.exe`, `build\steamclient.dll`. Copy both into the game folder.
 
-### Linux
+### Linux / WSL
 
-32-bit g++ (`g++-multilib`). Needs system Opus (`<opus/opus.h>`) and ALSA for voice.
+Needs a 32-bit toolchain plus **Opus** and **libasound2** (ALSA) for voice. On Ubuntu/Debian (including WSL):
+
+```sh
+sudo dpkg --add-architecture i386
+sudo apt update
+sudo apt install cmake g++ gcc-multilib g++-multilib \
+    libopus-dev:i386 libasound2-dev:i386
+```
+
+| Package | For |
+|---|---|
+| cmake, g++, gcc-multilib, g++-multilib | 32-bit C++ (`-m32`) |
+| **libopus-dev:i386** | Opus (`<opus/opus.h>`, `libopus`) |
+| **libasound2-dev:i386** | ALSA / libasound2 (`alsa/asoundlib.h`) |
+
+To **run** the game you also need **libcurl4:i386** (`libcurl.so.4`). steamclient loads it with `dlopen`, so the binary still starts without it — but HTTP FastDL and HTTP master lists do nothing. Connect, voice, LAN, and UDP masters keep working. Curl is not required to compile.
+
+```sh
+sudo apt install libcurl4:i386
+```
 
 ```sh
 ./build.sh

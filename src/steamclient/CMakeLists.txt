@@ -34,7 +34,7 @@ else()
     )
     target_compile_options(steamclient PRIVATE -fvisibility=hidden)
     target_link_options(steamclient PRIVATE -static-libstdc++ -static-libgcc)
-    target_link_libraries(steamclient PRIVATE pthread dl)
+    target_link_libraries(steamclient PRIVATE pthread dl opus asound)
 endif()
 
 target_include_directories(steamclient PRIVATE
