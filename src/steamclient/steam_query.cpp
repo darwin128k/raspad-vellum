@@ -641,6 +641,9 @@ struct VellumHttpList {
 	HINTERNET ses;
 	HINTERNET con;
 	HINTERNET req;
+	char hosta[256];
+	INTERNET_PORT port;
+	int https;
 #else
 	pthread_t thread;
 	pthread_mutex_t lock;
@@ -965,41 +968,33 @@ static void Vellum_HttpListSetNet(VellumHttpList *h, HINTERNET ses, HINTERNET co
 }
 #endif
 
-#ifdef _WIN32
-static int Vellum_HttpListFetch(VellumHttpList *h, const char *url, char **out, int *outn)
+#ifndef _WIN32
+static void Vellum_HttpListAbortNet(VellumHttpList *h)
 {
-	HINTERNET ses = NULL;
-	HINTERNET con = NULL;
-	HINTERNET req = NULL;
-	wchar_t host[256];
-	wchar_t path[768];
-	wchar_t wua[] = L"Valve/Steam HTTP Client 1.0";
+	(void)h;
+}
+#endif
+
+#ifdef _WIN32
+static int Vellum_HttpListParseUrl(const char *url, int *https, char *hosta, size_t hostn,
+                                  INTERNET_PORT *port, const char **path)
+{
 	const char *p;
 	const char *slash;
-	const char *colon;
-	char hosta[256];
-	int https = 0;
-	INTERNET_PORT port = 80;
-	DWORD proto;
-	DWORD n = 0;
-	DWORD cap = 0;
-	char *body = NULL;
-	size_t hostn;
-	int ok = 0;
-	DWORD ms;
+	char *colon;
+	size_t n;
 
-	*out = NULL;
-	*outn = 0;
-	if (url == NULL || url[0] == '\0' || (h != NULL && h->abort)) {
+	if (url == NULL || https == NULL || hosta == NULL || hostn == 0 || port == NULL || path == NULL) {
 		return 0;
 	}
 	if (Vellum_StrNicmp(url, "https://", 8) == 0) {
-		https = 1;
+		*https = 1;
 		p = url + 8;
-		port = 443;
+		*port = 443;
 	} else if (Vellum_StrNicmp(url, "http://", 7) == 0) {
+		*https = 0;
 		p = url + 7;
-		port = 80;
+		*port = 80;
 	} else {
 		return 0;
 	}
@@ -1007,24 +1002,66 @@ static int Vellum_HttpListFetch(VellumHttpList *h, const char *url, char **out, 
 	if (slash == NULL) {
 		return 0;
 	}
-	hostn = (size_t)(slash - p);
-	if (hostn == 0 || hostn >= sizeof(hosta)) {
+	n = (size_t)(slash - p);
+	if (n == 0 || n >= hostn) {
 		return 0;
 	}
-	memcpy(hosta, p, hostn);
-	hosta[hostn] = '\0';
+	memcpy(hosta, p, n);
+	hosta[n] = '\0';
 	colon = strchr(hosta, ':');
 	if (colon != NULL) {
-		port = (INTERNET_PORT)atoi(colon + 1);
-		*(char *)colon = '\0';
+		*port = (INTERNET_PORT)atoi(colon + 1);
+		*colon = '\0';
 	}
+	*path = slash;
+	return hosta[0] != '\0';
+}
+
+static void Vellum_HttpListCloseReq(VellumHttpList *h)
+{
+	HINTERNET req = NULL;
+	if (h == NULL) {
+		return;
+	}
+	Vellum_HttpListLock(h);
+	req = h->req;
+	h->req = NULL;
+	Vellum_HttpListUnlock(h);
+	if (req != NULL) {
+		WinHttpCloseHandle(req);
+	}
+}
+
+static int Vellum_HttpListEnsureConn(VellumHttpList *h, const char *url, wchar_t *path, int pathn)
+{
+	char hosta[256];
+	wchar_t host[256];
+	wchar_t wua[] = L"Valve/Steam HTTP Client 1.0";
+	const char *slash = NULL;
+	HINTERNET ses;
+	HINTERNET con;
+	INTERNET_PORT port = 80;
+	int https = 0;
+	DWORD proto;
+	DWORD ms;
+
+	if (h == NULL || path == NULL || pathn <= 0) {
+		return 0;
+	}
+	if (!Vellum_HttpListParseUrl(url, &https, hosta, sizeof(hosta), &port, &slash)) {
+		return 0;
+	}
+	if (MultiByteToWideChar(CP_ACP, 0, slash, -1, path, pathn) <= 0) {
+		return 0;
+	}
+	if (h->ses != NULL && h->con != NULL && !h->abort &&
+	    h->https == https && h->port == port && strcmp(h->hosta, hosta) == 0) {
+		return 1;
+	}
+	Vellum_HttpListAbortNet(h);
 	if (MultiByteToWideChar(CP_ACP, 0, hosta, -1, host, (int)(sizeof(host) / sizeof(host[0]))) <= 0) {
 		return 0;
 	}
-	if (MultiByteToWideChar(CP_ACP, 0, slash, -1, path, (int)(sizeof(path) / sizeof(path[0]))) <= 0) {
-		return 0;
-	}
-
 	/* NO_PROXY: IE/WPAD autodetection from inside hl.exe can stall WinINet/WinHTTP for seconds. */
 	ses = WinHttpOpen(wua, WINHTTP_ACCESS_TYPE_NO_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
 	if (ses == NULL) {
@@ -1038,32 +1075,71 @@ static int Vellum_HttpListFetch(VellumHttpList *h, const char *url, char **out, 
 	WinHttpSetOption(ses, WINHTTP_OPTION_CONNECT_TIMEOUT, &ms, sizeof(ms));
 	WinHttpSetOption(ses, WINHTTP_OPTION_SEND_TIMEOUT, &ms, sizeof(ms));
 	WinHttpSetOption(ses, WINHTTP_OPTION_RECEIVE_TIMEOUT, &ms, sizeof(ms));
-	if (h != NULL && h->abort) {
-		goto done;
+	if (h->abort) {
+		Vellum_HttpListAbortNet(h);
+		return 0;
 	}
 	con = WinHttpConnect(ses, host, port, 0);
 	if (con == NULL) {
 		Vellum_Log("HttpList WinHttpConnect err=%u host=%s", (unsigned)GetLastError(), hosta);
-		goto done;
+		Vellum_HttpListAbortNet(h);
+		return 0;
 	}
+	strncpy(h->hosta, hosta, sizeof(h->hosta) - 1);
+	h->hosta[sizeof(h->hosta) - 1] = '\0';
+	h->port = port;
+	h->https = https;
 	Vellum_HttpListSetNet(h, ses, con, NULL);
+	Vellum_Log("HttpList conn keep-alive https=%d %s:%u", https, hosta, (unsigned)port);
+	return 1;
+}
+
+static int Vellum_HttpListFetch(VellumHttpList *h, const char *url, char **out, int *outn)
+{
+	HINTERNET ses;
+	HINTERNET con;
+	HINTERNET req = NULL;
+	wchar_t path[768];
+	DWORD n = 0;
+	DWORD cap = 0;
+	char *body = NULL;
+	int ok = 0;
+
+	*out = NULL;
+	*outn = 0;
+	if (h == NULL || url == NULL || url[0] == '\0' || h->abort) {
+		return 0;
+	}
+	if (!Vellum_HttpListEnsureConn(h, url, path, (int)(sizeof(path) / sizeof(path[0])))) {
+		return 0;
+	}
+	Vellum_HttpListLock(h);
+	ses = h->ses;
+	con = h->con;
+	Vellum_HttpListUnlock(h);
+	if (ses == NULL || con == NULL) {
+		return 0;
+	}
 	req = WinHttpOpenRequest(con, L"GET", path, NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
-	                         https ? WINHTTP_FLAG_SECURE : 0);
+	                         h->https ? WINHTTP_FLAG_SECURE : 0);
 	if (req == NULL) {
 		Vellum_Log("HttpList WinHttpOpenRequest err=%u", (unsigned)GetLastError());
-		goto done;
+		Vellum_HttpListAbortNet(h);
+		return 0;
 	}
 	Vellum_HttpListSetNet(h, ses, con, req);
 	if (!WinHttpSendRequest(req, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0) ||
 	    !WinHttpReceiveResponse(req, NULL)) {
 		Vellum_Log("HttpList WinHttp GET err=%u url=%.180s", (unsigned)GetLastError(), url);
-		goto done;
+		Vellum_HttpListAbortNet(h);
+		free(body);
+		return 0;
 	}
 	for (;;) {
 		DWORD avail = 0;
 		DWORD got = 0;
 		char *nb;
-		if (h != NULL && h->abort) {
+		if (h->abort) {
 			break;
 		}
 		if (!WinHttpQueryDataAvailable(req, &avail)) {
@@ -1092,16 +1168,15 @@ static int Vellum_HttpListFetch(VellumHttpList *h, const char *url, char **out, 
 		}
 		n += got;
 	}
+	Vellum_HttpListCloseReq(h);
 	if (ok && body != NULL) {
 		body[n] = '\0';
 		*out = body;
 		*outn = (int)n;
-		body = NULL;
+		return 1;
 	}
-done:
-	Vellum_HttpListAbortNet(h);
 	free(body);
-	return *out != NULL;
+	return 0;
 }
 #else
 static int Vellum_HttpListFetch(VellumHttpList *h, const char *url, char **out, int *outn)
@@ -1264,8 +1339,11 @@ static void *Vellum_HttpListWorker(void *param)
 		int page_items;
 		Vellum_HttpListMakeUrl(url, (int)sizeof(url), h->url, offset);
 		if (!Vellum_HttpListFetch(h, url, &body, &n) || body == NULL) {
-			Vellum_Log("HttpList fetch fail offset=%d url=%.180s", offset, url);
-			break;
+			Vellum_HttpListAbortNet(h);
+			if (h->abort || !Vellum_HttpListFetch(h, url, &body, &n) || body == NULL) {
+				Vellum_Log("HttpList fetch fail offset=%d url=%.180s", offset, url);
+				break;
+			}
 		}
 		page_items = Vellum_CountSub(body, "\"connect\"");
 		added = Vellum_HttpListParse(body, h);
@@ -1278,6 +1356,7 @@ static void *Vellum_HttpListWorker(void *param)
 			break;
 		}
 	}
+	Vellum_HttpListAbortNet(h);
 	Vellum_HttpListLock(h);
 	h->done = 1;
 	Vellum_HttpListUnlock(h);
