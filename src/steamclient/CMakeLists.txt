@@ -1,13 +1,28 @@
 if(WIN32)
+    include(FetchContent)
+    set(OPUS_BUILD_SHARED_LIBRARY OFF CACHE BOOL "" FORCE)
+    set(OPUS_BUILD_TESTING OFF CACHE BOOL "" FORCE)
+    set(OPUS_BUILD_PROGRAMS OFF CACHE BOOL "" FORCE)
+    set(OPUS_INSTALL_PKG_CONFIG_MODULE OFF CACHE BOOL "" FORCE)
+    set(OPUS_INSTALL_CMAKE_CONFIG_MODULE OFF CACHE BOOL "" FORCE)
+    set(OPUS_STATIC_RUNTIME ON CACHE BOOL "" FORCE)
+    FetchContent_Declare(opus
+        GIT_REPOSITORY https://github.com/xiph/opus.git
+        GIT_TAG v1.5.2
+        GIT_SHALLOW TRUE
+    )
+    FetchContent_MakeAvailable(opus)
+
     add_library(steamclient SHARED
         dllmain.cpp
         identity.cpp
         steam_ifaces.cpp
         steam_query.cpp
         steam_http.cpp
+        steam_voice.cpp
         steamclient.def
     )
-    target_link_libraries(steamclient PRIVATE advapi32 ws2_32 wininet)
+    target_link_libraries(steamclient PRIVATE advapi32 ws2_32 wininet winmm opus)
     target_compile_definitions(steamclient PRIVATE _CRT_SECURE_NO_WARNINGS)
 else()
     add_library(steamclient SHARED
@@ -15,6 +30,7 @@ else()
         steam_ifaces.cpp
         steam_query.cpp
         steam_http.cpp
+        steam_voice.cpp
     )
     target_compile_options(steamclient PRIVATE -fvisibility=hidden)
     target_link_options(steamclient PRIVATE -static-libstdc++ -static-libgcc)

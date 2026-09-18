@@ -3,6 +3,7 @@
 #include "exports.h"
 #include "steam_query.h"
 #include "steam_http.h"
+#include "steam_voice.h"
 
 #include <stdarg.h>
 #include <stdio.h>
@@ -127,17 +128,21 @@ public:
 		pchBuffer[cubBuffer - 1] = '\0';
 		return true;
 	}
-	virtual void StartVoiceRecording() {}
-	virtual void StopVoiceRecording() {}
-	virtual int GetAvailableVoice(uint32 *pcbCompressed, uint32 *pcbUncompressed, uint32)
+	virtual void StartVoiceRecording() { Vellum_VoiceStart(); }
+	virtual void StopVoiceRecording() { Vellum_VoiceStop(); }
+	virtual int GetAvailableVoice(uint32 *pcbCompressed, uint32 *pcbUncompressed, uint32 wantRate)
 	{
-		if (pcbCompressed) *pcbCompressed = 0;
-		if (pcbUncompressed) *pcbUncompressed = 0;
-		return 1; /* k_EVoiceResultNotRecording */
+		return Vellum_VoiceAvailable(pcbCompressed, pcbUncompressed, wantRate);
 	}
-	virtual int GetVoice(bool, void *, uint32, uint32 *, bool, void *, uint32, uint32 *, uint32) { return 1; }
-	virtual int DecompressVoice(const void *, uint32, void *, uint32, uint32 *, uint32) { return 1; }
-	virtual uint32 GetVoiceOptimalSampleRate() { return 11025; }
+	virtual int GetVoice(bool wantComp, void *dst, uint32 dstn, uint32 *wrote, bool wantUncomp, void *udst, uint32 udstn, uint32 *uwrote, uint32 wantRate)
+	{
+		return Vellum_VoiceGet(wantComp, dst, dstn, wrote, wantUncomp, udst, udstn, uwrote, wantRate);
+	}
+	virtual int DecompressVoice(const void *comp, uint32 cn, void *dst, uint32 dn, uint32 *wrote, uint32 wantRate)
+	{
+		return Vellum_VoiceDecompress(comp, cn, dst, dn, wrote, wantRate);
+	}
+	virtual uint32 GetVoiceOptimalSampleRate() { return Vellum_VoiceOptimalRate(); }
 	virtual HAuthTicket GetAuthSessionTicket(void *pTicket, int cbMaxTicket, uint32 *pcbTicket)
 	{
 		Vellum_Log("GetAuthSessionTicket max=%d", cbMaxTicket);
@@ -184,17 +189,21 @@ public:
 		pchBuffer[cubBuffer - 1] = '\0';
 		return true;
 	}
-	virtual void StartVoiceRecording() {}
-	virtual void StopVoiceRecording() {}
-	virtual int GetAvailableVoice(uint32 *pcbCompressed, uint32 *pcbUncompressed, uint32)
+	virtual void StartVoiceRecording() { Vellum_VoiceStart(); }
+	virtual void StopVoiceRecording() { Vellum_VoiceStop(); }
+	virtual int GetAvailableVoice(uint32 *pcbCompressed, uint32 *pcbUncompressed, uint32 wantRate)
 	{
-		if (pcbCompressed) *pcbCompressed = 0;
-		if (pcbUncompressed) *pcbUncompressed = 0;
-		return 1;
+		return Vellum_VoiceAvailable(pcbCompressed, pcbUncompressed, wantRate);
 	}
-	virtual int GetVoice(bool, void *, uint32, uint32 *, bool, void *, uint32, uint32 *, uint32) { return 1; }
-	virtual int DecompressVoice(const void *, uint32, void *, uint32, uint32 *, uint32) { return 1; }
-	virtual uint32 GetVoiceOptimalSampleRate() { return 11025; }
+	virtual int GetVoice(bool wantComp, void *dst, uint32 dstn, uint32 *wrote, bool wantUncomp, void *udst, uint32 udstn, uint32 *uwrote, uint32 wantRate)
+	{
+		return Vellum_VoiceGet(wantComp, dst, dstn, wrote, wantUncomp, udst, udstn, uwrote, wantRate);
+	}
+	virtual int DecompressVoice(const void *comp, uint32 cn, void *dst, uint32 dn, uint32 *wrote, uint32 wantRate)
+	{
+		return Vellum_VoiceDecompress(comp, cn, dst, dn, wrote, wantRate);
+	}
+	virtual uint32 GetVoiceOptimalSampleRate() { return Vellum_VoiceOptimalRate(); }
 	virtual HAuthTicket GetAuthSessionTicket(void *pTicket, int cbMaxTicket, uint32 *pcbTicket, const void *)
 	{
 		Vellum_Log("GetAuthSessionTicket021 max=%d", cbMaxTicket);
