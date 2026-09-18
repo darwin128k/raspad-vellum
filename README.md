@@ -18,7 +18,7 @@ The engine, filesystem, and `hw` live in [raspad-hl](https://github.com/darwin12
 - **SteamClient012 / 017 / 020** — enough of `CreateInterface` for GoldSrc 8684 and Steam Half-Life (Oct 2024 / 10210+).
 - **Auth** — by default a 64-byte Vellum ticket (`VLLM`, `CA_VELLUM`). Optional `-DVELLUM_AUTH_REVEMU2013=ON` emits a RevEmu 2013 blob instead (`CA_REVEMU2013` on Reunion). One or the other, not both.
 - **Identity** — persona is the OS user name. The ticket ident is hostname plus a machine serial (Windows: `COMPUTERNAME` and the C: volume serial; Linux: `gethostname` and `/etc/machine-id`).
-- **Server browser** — favorites/history via `config/serverbrowser.vdf`. Internet lists come from `config/masterserver.vdf` (HTTP JSON catalogs and/or UDP A2M hosts). LAN is UDP broadcast. Game/map/ping are filled with A2S.
+- **Server browser** — favorites/history via `config/serverbrowser.vdf`. Internet lists come from `config/masterserver.vdf` (nothing compiled in). LAN is UDP broadcast. Game/map/ping are filled with A2S.
 - **HTTP** — real `ISteamHTTP` for FastDL and list fetches (WinINet on Windows, libcurl on Linux).
 - **Voice** — `ISteamUser` capture/encode/decode. Microphone opens only while `+voicerecord` is held. Packets are Steam Voice Opus (24 kHz), so other Vellum/Steam-format clients can hear you. No extra voice plugin.
 
@@ -26,14 +26,17 @@ The engine, filesystem, and `hw` live in [raspad-hl](https://github.com/darwin12
 
 Written next to the game / `steamclient` binary.
 
-**`config/masterserver.vdf`** — Internet tab sources. Missing file gets a default HTTP catalog. `http://` / `https://` is JSON (`{offset}` for paging). Query parameters belong to that address: GameMonitoring uses `status=1` and optional `country={country}` (Windows/OS region, not VPN IP; or write `country=RU` yourself). Drop `{country}` for a world list. JSON `status` / `country` are optional — missing means keep the server. Anything else is a UDP master: hostname or IPv4, optional `:port` (default `27011`). Several entries are queried together; IPs are deduped.
+**`config/masterserver.vdf`** — Internet tab sources. Missing or empty file means no public search (no compiled-in catalog). Each numbered block needs `address`. Other keys in the same block replace `{name}` in that address. `{offset}` is filled while paging; `{country}` is the OS region unless the block sets `country` itself. `http://` / `https://` is JSON. Anything else is a UDP master (`host` or `host:port`, default `27011`). Several blocks are queried together.
 
 ```
 "master"
 {
 	"1"
 	{
-		"address"		"https://api.gamemonitoring.net/servers?game=10&status=1&country={country}&limit=500&offset={offset}"
+		"address"		"https://api.example/servers?game={game}&status={status}&country={country}&limit={limit}&offset={offset}"
+		"game"			"10"
+		"status"		"1"
+		"limit"			"500"
 	}
 }
 ```
@@ -119,7 +122,7 @@ One loader instance at a time. Optional `-launch` / `-appid`. Default game is `c
 
 Release builds write no `vellum.log`. Debug (`build.bat debug`) logs a timestamped session: identity, interfaces, connect ticket, master list, and voice tx/rx.
 
-CMake `-DVELLUM_NO_SERVER_BROWSER=ON` skips `config/masterserver.vdf` so the Internet tab stays empty. Default is **OFF** (search enabled). Favorites and LAN are unchanged. This is for a later one-server build that will not ship a public browser.
+CMake `-DVELLUM_NO_SERVER_BROWSER=ON` skips `config/masterserver.vdf` so the Internet tab stays empty. Default is **OFF** (read the VDF). Favorites and LAN are unchanged.
 
 CMake `-DVELLUM_AUTH_REVEMU2013=ON` (or `build.bat revemu2013`) sends RevEmu 2013 tickets so Reunion/DProto servers that allow `cid_RevEmu2013` will accept the client. Default is **OFF**: VLLM only, no RevEmu dialect. The two tickets are not mixed in one build.
 

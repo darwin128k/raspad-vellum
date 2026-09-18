@@ -1183,9 +1183,6 @@ public:
 };
 
 #define VELLUM_MASTER_CFG_MAX 8
-/* Default catalog URL is GameMonitoring's dialect (status=1). Other VDF entries keep their own query string. */
-#define VELLUM_MASTER_DEFAULT_URL \
-	"https://api.gamemonitoring.net/servers?game=10&status=1&country={country}&limit=500&offset={offset}"
 
 static VellumFav g_favs[VELLUM_FAV_MAX];
 static int g_fav_n;
@@ -1633,46 +1630,16 @@ static void Vellum_FavSave()
 	fclose(f);
 }
 
-static void Vellum_MasterPathNamed(char *path, size_t pathSize, const char *name)
-{
-	char dir[512];
-	Vellum_GameDir(dir, sizeof(dir));
-#ifdef _WIN32
-	_snprintf(path, pathSize, "%sconfig\\%s", dir, name);
-#else
-	snprintf(path, pathSize, "%sconfig/%s", dir, name);
-#endif
-	path[pathSize - 1] = '\0';
-}
-
 static void Vellum_MasterPath(char *path, size_t pathSize)
 {
-	Vellum_MasterPathNamed(path, pathSize, "masterserver.vdf");
-}
-
-static void Vellum_MasterWriteDefault(const char *path)
-{
-	FILE *f;
 	char dir[512];
-	char cfg[512];
 	Vellum_GameDir(dir, sizeof(dir));
 #ifdef _WIN32
-	_snprintf(cfg, sizeof(cfg), "%sconfig", dir);
-	CreateDirectoryA(cfg, NULL);
+	_snprintf(path, pathSize, "%sconfig\\masterserver.vdf", dir);
 #else
-	snprintf(cfg, sizeof(cfg), "%sconfig", dir);
-	mkdir(cfg, 0755);
+	snprintf(path, pathSize, "%sconfig/masterserver.vdf", dir);
 #endif
-	f = fopen(path, "w");
-	if (f == NULL) {
-		return;
-	}
-	fprintf(f, "\"master\"\n{\n");
-	fprintf(f, "\t\"1\"\n\t{\n");
-	fprintf(f, "\t\t\"address\"\t\t\"%s\"\n", VELLUM_MASTER_DEFAULT_URL);
-	fprintf(f, "\t}\n}\n");
-	fclose(f);
-	Vellum_Log("Master wrote default %s", path);
+	path[pathSize - 1] = '\0';
 }
 
 static void Vellum_MasterAddAddr(const char *addr)
@@ -1696,80 +1663,191 @@ static void Vellum_MasterAddAddr(const char *addr)
 	g_master_n++;
 }
 
+static int Vellum_MasterReadQuoted(const char **ps, char *out, int outn)
+{
+	const char *s = *ps;
+	int n = 0;
+	if (*s != '"') {
+		return 0;
+	}
+	s++;
+	while (*s && *s != '"' && n < outn - 1) {
+		out[n++] = *s++;
+	}
+	out[n] = '\0';
+	if (*s != '"') {
+		return 0;
+	}
+	*ps = s + 1;
+	return 1;
+}
+
+static void Vellum_MasterReplaceTok(char *s, int sn, const char *tok, const char *val)
+{
+	char buf[512];
+	char *ph;
+	size_t tlen;
+	if (s == NULL || tok == NULL || val == NULL || tok[0] == '\0') {
+		return;
+	}
+	tlen = strlen(tok);
+	while ((ph = strstr(s, tok)) != NULL) {
+#ifdef _WIN32
+		_snprintf(buf, sizeof(buf), "%.*s%s%s", (int)(ph - s), s, val, ph + tlen);
+#else
+		snprintf(buf, sizeof(buf), "%.*s%s%s", (int)(ph - s), s, val, ph + tlen);
+#endif
+		buf[sizeof(buf) - 1] = '\0';
+		strncpy(s, buf, (size_t)sn - 1);
+		s[sn - 1] = '\0';
+	}
+}
+
+static void Vellum_MasterFlushBlock(char *addr, char keys[][32], char vals[][128], int nk)
+{
+	char tok[40];
+	int i;
+	if (addr == NULL || addr[0] == '\0') {
+		return;
+	}
+	for (i = 0; i < nk; i++) {
+		if (keys[i][0] == '\0' || strcmp(keys[i], "offset") == 0) {
+			continue;
+		}
+#ifdef _WIN32
+		_snprintf(tok, sizeof(tok), "{%s}", keys[i]);
+#else
+		snprintf(tok, sizeof(tok), "{%s}", keys[i]);
+#endif
+		Vellum_MasterReplaceTok(addr, 512, tok, vals[i]);
+	}
+	Vellum_MasterAddAddr(addr);
+}
+
+static void Vellum_MasterLoadBytes(const char *text)
+{
+	const char *s = text;
+	int depth = 0;
+	char addr[512];
+	char keys[8][32];
+	char vals[8][128];
+	int nk = 0;
+	addr[0] = '\0';
+	if (s == NULL) {
+		return;
+	}
+	while (*s) {
+		while (*s == ' ' || *s == '\t' || *s == '\r' || *s == '\n') {
+			s++;
+		}
+		if (*s == '{') {
+			depth++;
+			s++;
+			continue;
+		}
+		if (*s == '}') {
+			if (depth == 2) {
+				Vellum_MasterFlushBlock(addr, keys, vals, nk);
+				addr[0] = '\0';
+				nk = 0;
+			}
+			depth--;
+			s++;
+			continue;
+		}
+		if (*s == '"') {
+			char key[64];
+			char val[512];
+			if (!Vellum_MasterReadQuoted(&s, key, (int)sizeof(key))) {
+				s++;
+				continue;
+			}
+			while (*s == ' ' || *s == '\t' || *s == '\r' || *s == '\n') {
+				s++;
+			}
+			if (*s != '"' || !Vellum_MasterReadQuoted(&s, val, (int)sizeof(val))) {
+				continue;
+			}
+			if (depth < 2) {
+				continue;
+			}
+			if (strcmp(key, "address") == 0) {
+				strncpy(addr, val, sizeof(addr) - 1);
+				addr[sizeof(addr) - 1] = '\0';
+			} else if (nk < 8) {
+				strncpy(keys[nk], key, sizeof(keys[0]) - 1);
+				keys[nk][sizeof(keys[0]) - 1] = '\0';
+				strncpy(vals[nk], val, sizeof(vals[0]) - 1);
+				vals[nk][sizeof(vals[0]) - 1] = '\0';
+				nk++;
+			}
+			continue;
+		}
+		s++;
+	}
+	if (addr[0] != '\0') {
+		Vellum_MasterFlushBlock(addr, keys, vals, nk);
+	}
+}
+
 static void Vellum_MasterLoadFile(const char *path)
 {
-	FILE *f = fopen(path, "r");
-	char line[768];
+	FILE *f;
+	char *text;
+	long sz;
+	size_t n;
+	f = fopen(path, "rb");
 	if (f == NULL) {
 		return;
 	}
-	while (fgets(line, sizeof(line), f) != NULL) {
-		char *q1;
-		char *q2;
-		char *q3;
-		char *q4;
-		if (strstr(line, "\"address\"") == NULL) {
-			continue;
-		}
-		q1 = strchr(line, '"');
-		q2 = q1 ? strchr(q1 + 1, '"') : NULL;
-		q3 = q2 ? strchr(q2 + 1, '"') : NULL;
-		q4 = q3 ? strchr(q3 + 1, '"') : NULL;
-		if (q3 && q4 && (q4 - q3 - 1) > 0) {
-			size_t n = (size_t)(q4 - q3 - 1);
-			char addr[512];
-			if (n >= sizeof(addr)) {
-				n = sizeof(addr) - 1;
-			}
-			memcpy(addr, q3 + 1, n);
-			addr[n] = '\0';
-			Vellum_MasterAddAddr(addr);
-		}
+	if (fseek(f, 0, SEEK_END) != 0) {
+		fclose(f);
+		return;
 	}
+	sz = ftell(f);
+	if (sz <= 0 || sz > 64 * 1024) {
+		fclose(f);
+		return;
+	}
+	if (fseek(f, 0, SEEK_SET) != 0) {
+		fclose(f);
+		return;
+	}
+	text = (char *)malloc((size_t)sz + 1);
+	if (text == NULL) {
+		fclose(f);
+		return;
+	}
+	n = fread(text, 1, (size_t)sz, f);
 	fclose(f);
+	text[n] = '\0';
+	Vellum_MasterLoadBytes(text);
+	free(text);
 }
 
 static void Vellum_MasterLoad()
 {
-#ifdef VELLUM_NO_SERVER_BROWSER
-	if (g_master_loaded) {
-		return;
-	}
-	g_master_loaded = 1;
-	g_master_n = 0;
-	Vellum_Log("master search disabled");
-#else
 	char path[512];
-	FILE *probe;
 	int i;
 	if (g_master_loaded) {
 		return;
 	}
 	g_master_loaded = 1;
 	g_master_n = 0;
+#ifdef VELLUM_NO_SERVER_BROWSER
+	Vellum_Log("master search disabled");
+	return;
+#endif
 	Vellum_MasterPath(path, sizeof(path));
-	probe = fopen(path, "r");
-	if (probe != NULL) {
-		fclose(probe);
-		Vellum_MasterLoadFile(path);
-	} else {
-		char oldpath[512];
-		Vellum_MasterPathNamed(oldpath, sizeof(oldpath), "master.vdf");
-		probe = fopen(oldpath, "r");
-		if (probe != NULL) {
-			fclose(probe);
-			Vellum_MasterLoadFile(oldpath);
-			Vellum_Log("master fallback %s", oldpath);
-		} else {
-			Vellum_MasterWriteDefault(path);
-			Vellum_MasterAddAddr(VELLUM_MASTER_DEFAULT_URL);
-		}
+	Vellum_MasterLoadFile(path);
+	if (g_master_n <= 0) {
+		Vellum_Log("master none %s", path);
+		return;
 	}
 	Vellum_Log("master file %s n=%d", path, g_master_n);
 	for (i = 0; i < g_master_n; i++) {
 		Vellum_Log("master [%d] %s", i + 1, g_master_addrs[i]);
 	}
-#endif
 }
 
 static int Vellum_FavFind(AppId_t app, uint32 ip, uint16 conn, uint16 query)
