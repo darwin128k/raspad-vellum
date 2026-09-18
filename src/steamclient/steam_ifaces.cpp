@@ -13,6 +13,7 @@
 #ifdef _WIN32
 #include <windows.h>
 #else
+#include <strings.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #ifndef MAX_PATH
@@ -518,6 +519,9 @@ static bool Vellum_FavGet(int i, AppId_t *app, uint32 *ip, uint16 *conn, uint16 
 static int Vellum_FavAdd(AppId_t app, uint32 ip, uint16 conn, uint16 query, uint32 flags, uint32 played);
 static bool Vellum_FavRemove(AppId_t app, uint32 ip, uint16 conn, uint16 query, uint32 flags);
 static HServerListRequest Vellum_ListRequest(AppId_t app, uint32 flagMask, void *response);
+static HServerListRequest Vellum_ListRequestInternet(AppId_t app, void **filters, uint32 nfilters, void *cb, int spectator);
+static HServerListRequest Vellum_ListRequestLan(AppId_t app, void *cb);
+static HServerListRequest Vellum_ListRequestEmpty(void *cb);
 static void Vellum_ListRelease(HServerListRequest h);
 static void *Vellum_ListDetails(HServerListRequest h, int i);
 static int Vellum_ListCount(HServerListRequest h);
@@ -579,9 +583,18 @@ public:
 
 class SteamMatchmakingServers {
 public:
-	virtual HServerListRequest RequestInternetServerList(AppId_t, void **, uint32, void *) { return NULL; }
-	virtual HServerListRequest RequestLANServerList(AppId_t, void *) { return NULL; }
-	virtual HServerListRequest RequestFriendsServerList(AppId_t, void **, uint32, void *) { return NULL; }
+	virtual HServerListRequest RequestInternetServerList(AppId_t app, void **filters, uint32 n, void *cb)
+	{
+		return Vellum_ListRequestInternet(app, filters, n, cb, 0);
+	}
+	virtual HServerListRequest RequestLANServerList(AppId_t app, void *cb)
+	{
+		return Vellum_ListRequestLan(app, cb);
+	}
+	virtual HServerListRequest RequestFriendsServerList(AppId_t, void **, uint32, void *cb)
+	{
+		return Vellum_ListRequestEmpty(cb);
+	}
 	virtual HServerListRequest RequestFavoritesServerList(AppId_t app, void **, uint32, void *cb)
 	{
 		return Vellum_ListRequest(app, k_unFavoriteFlagFavorite, cb);
@@ -590,7 +603,10 @@ public:
 	{
 		return Vellum_ListRequest(app, k_unFavoriteFlagHistory, cb);
 	}
-	virtual HServerListRequest RequestSpectatorServerList(AppId_t, void **, uint32, void *) { return NULL; }
+	virtual HServerListRequest RequestSpectatorServerList(AppId_t app, void **filters, uint32 n, void *cb)
+	{
+		return Vellum_ListRequestInternet(app, filters, n, cb, 1);
+	}
 	virtual void ReleaseRequest(HServerListRequest h) { Vellum_ListRelease(h); }
 	virtual void *GetServerDetails(HServerListRequest h, int i) { return Vellum_ListDetails(h, i); }
 	virtual void CancelQuery(HServerListRequest) {}
@@ -1048,7 +1064,15 @@ static int Vellum_FillAuthTicket(void *pTicket, int cbMaxTicket, uint32 *pcbTick
 }
 
 #define VELLUM_FAV_MAX 64
+#define VELLUM_LIST_MAX 512
 #define VELLUM_REQ_MAX 4
+
+enum {
+	VELLUM_LIST_FAV = 0,
+	VELLUM_LIST_INTERNET = 1,
+	VELLUM_LIST_LAN = 2,
+	VELLUM_LIST_EMPTY = 3
+};
 
 struct VellumFav {
 	AppId_t app;
@@ -1065,8 +1089,12 @@ struct VellumListReq {
 	int notified;
 	int ping_next;
 	int ping_done;
+	int master_done;
+	int kind;
+	AppId_t app;
+	char filter[512];
 	void *cb;
-	VellumGameServerItem items[VELLUM_FAV_MAX];
+	VellumGameServerItem items[VELLUM_LIST_MAX];
 };
 
 class SteamServerListResponse {
@@ -1439,12 +1467,38 @@ static void Vellum_FillItem(VellumGameServerItem *it, const VellumFav *e)
 	it->name[sizeof(it->name) - 1] = '\0';
 }
 
-static HServerListRequest Vellum_ListRequest(AppId_t app, uint32 flagMask, void *response)
+static void Vellum_FillItemAdr(VellumGameServerItem *it, uint32 ip, uint16 port, AppId_t app)
+{
+	unsigned char *b;
+	memset(it, 0, sizeof(*it));
+	it->adr.conn = port;
+	it->adr.query = port;
+	it->adr.ip = ip;
+	it->hadResponse = false;
+	it->appId = app ? app : 10;
+	it->maxPlayers = 32;
+	if (it->appId == 10) {
+		strncpy(it->gameDir, "cstrike", sizeof(it->gameDir) - 1);
+		strncpy(it->desc, "Counter-Strike", sizeof(it->desc) - 1);
+	} else {
+		strncpy(it->gameDir, "valve", sizeof(it->gameDir) - 1);
+		strncpy(it->desc, "Half-Life", sizeof(it->desc) - 1);
+	}
+	b = (unsigned char *)&ip;
+#ifdef _WIN32
+	_snprintf(it->name, sizeof(it->name), "%u.%u.%u.%u:%u",
+	          (unsigned)b[3], (unsigned)b[2], (unsigned)b[1], (unsigned)b[0], (unsigned)port);
+#else
+	snprintf(it->name, sizeof(it->name), "%u.%u.%u.%u:%u",
+	         (unsigned)b[3], (unsigned)b[2], (unsigned)b[1], (unsigned)b[0], (unsigned)port);
+#endif
+	it->name[sizeof(it->name) - 1] = '\0';
+}
+
+static VellumListReq *Vellum_AllocReq(void *response)
 {
 	int r;
-	int i;
 	VellumListReq *req = NULL;
-	Vellum_FavLoad();
 	for (r = 0; r < VELLUM_REQ_MAX; r++) {
 		if (!g_reqs[r].used) {
 			req = &g_reqs[r];
@@ -1454,9 +1508,135 @@ static HServerListRequest Vellum_ListRequest(AppId_t app, uint32 flagMask, void 
 	if (req == NULL) {
 		req = &g_reqs[0];
 	}
+	Vellum_MasterCancel(req);
 	memset(req, 0, sizeof(*req));
 	req->used = 1;
 	req->cb = response;
+	return req;
+}
+
+static void Vellum_OnMaster(void *user, uint32 ip, uint16 port, int finished)
+{
+	VellumListReq *req = (VellumListReq *)user;
+	int i;
+	if (req == NULL || !req->used) {
+		return;
+	}
+	if (finished) {
+		req->master_done = 1;
+		Vellum_Log("Master done count=%d", req->count);
+		return;
+	}
+	if (req->count >= VELLUM_LIST_MAX) {
+		Vellum_MasterCancel(req);
+		req->master_done = 1;
+		return;
+	}
+	for (i = 0; i < req->count; i++) {
+		if (req->items[i].adr.ip == ip && req->items[i].adr.conn == port) {
+			return;
+		}
+	}
+	Vellum_FillItemAdr(&req->items[req->count], ip, port, req->app);
+	req->count++;
+}
+
+static void Vellum_AppendFilter(char *out, size_t n, const char *key, const char *val)
+{
+	size_t used = strlen(out);
+	if (key == NULL || val == NULL || used + strlen(key) + strlen(val) + 3 >= n) {
+		return;
+	}
+#ifdef _WIN32
+	_snprintf(out + used, n - used, "\\%s\\%s", key, val);
+#else
+	snprintf(out + used, n - used, "\\%s\\%s", key, val);
+#endif
+}
+
+static void Vellum_BuildMasterFilter(char *out, size_t n, AppId_t app, void **filters, uint32 nfilters, int spectator)
+{
+	uint32 i;
+	int has_app = 0;
+	int has_dir = 0;
+	int has_proxy = 0;
+	char appbuf[16];
+	out[0] = '\0';
+	if (app == 0) {
+		app = 10;
+	}
+	for (i = 0; i < nfilters && filters != NULL; i++) {
+		char *key;
+		char *val;
+		if (filters[i] == NULL) {
+			continue;
+		}
+		key = (char *)filters[i];
+		val = key + 256;
+		if (key[0] == '\0') {
+			continue;
+		}
+		Vellum_Log("ListFilter %.64s=%.64s", key, val);
+#ifdef _WIN32
+		if (_stricmp(key, "appid") == 0) {
+			has_app = 1;
+		}
+		if (_stricmp(key, "gamedir") == 0) {
+			has_dir = 1;
+		}
+		if (_stricmp(key, "proxy") == 0 || _stricmp(key, "type") == 0) {
+			has_proxy = 1;
+		}
+#else
+		if (strcasecmp(key, "appid") == 0) {
+			has_app = 1;
+		}
+		if (strcasecmp(key, "gamedir") == 0) {
+			has_dir = 1;
+		}
+		if (strcasecmp(key, "proxy") == 0 || strcasecmp(key, "type") == 0) {
+			has_proxy = 1;
+		}
+#endif
+	}
+#ifdef _WIN32
+	_snprintf(appbuf, sizeof(appbuf), "%u", (unsigned)app);
+#else
+	snprintf(appbuf, sizeof(appbuf), "%u", (unsigned)app);
+#endif
+	if (!has_app) {
+		Vellum_AppendFilter(out, n, "appid", appbuf);
+	}
+	if (!has_dir && app == 10) {
+		Vellum_AppendFilter(out, n, "gamedir", "cstrike");
+	}
+	if (spectator && !has_proxy) {
+		Vellum_AppendFilter(out, n, "proxy", "1");
+	}
+	for (i = 0; i < nfilters && filters != NULL; i++) {
+		char *key;
+		char *val;
+		if (filters[i] == NULL) {
+			continue;
+		}
+		key = (char *)filters[i];
+		val = key + 256;
+		if (key[0] == '\0') {
+			continue;
+		}
+		Vellum_AppendFilter(out, n, key, val);
+	}
+}
+
+static HServerListRequest Vellum_ListRequest(AppId_t app, uint32 flagMask, void *response)
+{
+	int i;
+	VellumListReq *req;
+	Vellum_FavLoad();
+	req = Vellum_AllocReq(response);
+	req->kind = VELLUM_LIST_FAV;
+	req->master_done = 1;
+	req->app = app ? app : 10;
 	for (i = 0; i < g_fav_n && req->count < VELLUM_FAV_MAX; i++) {
 		if (app != 0 && g_favs[i].app != 0 && g_favs[i].app != app) {
 			continue;
@@ -1471,6 +1651,40 @@ static HServerListRequest Vellum_ListRequest(AppId_t app, uint32 flagMask, void 
 	return (HServerListRequest)req;
 }
 
+static HServerListRequest Vellum_ListRequestInternet(AppId_t app, void **filters, uint32 nfilters, void *cb, int spectator)
+{
+	VellumListReq *req = Vellum_AllocReq(cb);
+	req->kind = VELLUM_LIST_INTERNET;
+	req->app = app ? app : 10;
+	Vellum_BuildMasterFilter(req->filter, sizeof(req->filter), req->app, filters, nfilters, spectator);
+	if (!Vellum_MasterStart(req->filter, Vellum_OnMaster, req)) {
+		req->master_done = 1;
+	}
+	Vellum_Log("ListInternet app=%u spec=%d filter=%s cb=%p", (unsigned)req->app, spectator, req->filter, cb);
+	return (HServerListRequest)req;
+}
+
+static HServerListRequest Vellum_ListRequestLan(AppId_t app, void *cb)
+{
+	VellumListReq *req = Vellum_AllocReq(cb);
+	req->kind = VELLUM_LIST_LAN;
+	req->app = app ? app : 10;
+	if (!Vellum_LanStart(Vellum_OnMaster, req)) {
+		req->master_done = 1;
+	}
+	Vellum_Log("ListLAN app=%u cb=%p", (unsigned)req->app, cb);
+	return (HServerListRequest)req;
+}
+
+static HServerListRequest Vellum_ListRequestEmpty(void *cb)
+{
+	VellumListReq *req = Vellum_AllocReq(cb);
+	req->kind = VELLUM_LIST_EMPTY;
+	req->master_done = 1;
+	Vellum_Log("ListEmpty cb=%p", cb);
+	return (HServerListRequest)req;
+}
+
 static void Vellum_ListRelease(HServerListRequest h)
 {
 	VellumListReq *req = (VellumListReq *)h;
@@ -1480,6 +1694,7 @@ static void Vellum_ListRelease(HServerListRequest h)
 	}
 	for (r = 0; r < VELLUM_REQ_MAX; r++) {
 		if (&g_reqs[r] == req) {
+			Vellum_MasterCancel(req);
 			req->cb = NULL;
 			req->notified = 1;
 			req->used = 0;
@@ -1507,24 +1722,44 @@ static int Vellum_ListCount(HServerListRequest h)
 static void Vellum_RefreshListQuery(HServerListRequest h)
 {
 	VellumListReq *req = (VellumListReq *)h;
-	if (req != NULL && req->used) {
-		req->ping_next = 0;
-		req->ping_done = 0;
-		req->notified = 0;
+	if (req == NULL || !req->used) {
+		return;
+	}
+	req->ping_next = 0;
+	req->ping_done = 0;
+	req->notified = 0;
+	if (req->kind == VELLUM_LIST_INTERNET) {
+		req->count = 0;
+		req->master_done = 0;
+		if (!Vellum_MasterStart(req->filter, Vellum_OnMaster, req)) {
+			req->master_done = 1;
+		}
+	} else if (req->kind == VELLUM_LIST_LAN) {
+		req->count = 0;
+		req->master_done = 0;
+		if (!Vellum_LanStart(Vellum_OnMaster, req)) {
+			req->master_done = 1;
+		}
 	}
 }
 
 static bool Vellum_ListIsRefreshing(HServerListRequest h)
 {
 	VellumListReq *req = (VellumListReq *)h;
-	return req != NULL && req->used && req->ping_done < req->count;
+	if (req == NULL || !req->used) {
+		return false;
+	}
+	if (!req->master_done) {
+		return true;
+	}
+	return req->ping_done < req->count;
 }
 
 static void Vellum_OnListPing(void *user, int ok, const VellumGameServerItem *item)
 {
 	size_t u = (size_t)user;
-	int r = (int)(u / VELLUM_FAV_MAX);
-	int i = (int)(u % VELLUM_FAV_MAX);
+	int r = (int)(u / VELLUM_LIST_MAX);
+	int i = (int)(u % VELLUM_LIST_MAX);
 	VellumListReq *req;
 	SteamServerListResponse *cb;
 	if (r < 0 || r >= VELLUM_REQ_MAX) {
@@ -1566,8 +1801,10 @@ static void Vellum_OnListPing(void *user, int ok, const VellumGameServerItem *it
 	if (cb != NULL) {
 		cb->ServerResponded((HServerListRequest)req, i);
 	}
-	Vellum_Log("ListPing i=%d ok=%d map=%s game=%s players=%d ping=%d",
-	           i, ok, req->items[i].map, req->items[i].desc, req->items[i].players, req->items[i].ping);
+	if (i < 8 || (i % 50) == 0) {
+		Vellum_Log("ListPing i=%d ok=%d map=%s game=%s players=%d ping=%d",
+		           i, ok, req->items[i].map, req->items[i].desc, req->items[i].players, req->items[i].ping);
+	}
 }
 
 static void Vellum_StartListPings()
@@ -1581,12 +1818,14 @@ static void Vellum_StartListPings()
 		while (req->ping_next < req->count) {
 			int i = req->ping_next;
 			uint16 port = req->items[i].adr.query ? req->items[i].adr.query : req->items[i].adr.conn;
-			void *user = (void *)(size_t)(r * VELLUM_FAV_MAX + i);
+			void *user = (void *)(size_t)(r * VELLUM_LIST_MAX + i);
 			if (Vellum_QueryInfo(req->items[i].adr.ip, port, Vellum_OnListPing, user) == 0) {
 				break;
 			}
 			req->ping_next++;
-			Vellum_Log("ListPingStart i=%d ip=%u port=%u", i, req->items[i].adr.ip, (unsigned)port);
+			if (i == 0 || (i % 50) == 0) {
+				Vellum_Log("ListPingStart i=%d ip=%u port=%u", i, req->items[i].adr.ip, (unsigned)port);
+			}
 		}
 	}
 }
@@ -1605,7 +1844,7 @@ static void Vellum_RefreshListServer(HServerListRequest h, int i)
 		return;
 	}
 	port = req->items[i].adr.query ? req->items[i].adr.query : req->items[i].adr.conn;
-	user = (void *)(size_t)(r * VELLUM_FAV_MAX + i);
+	user = (void *)(size_t)(r * VELLUM_LIST_MAX + i);
 	Vellum_QueryInfo(req->items[i].adr.ip, port, Vellum_OnListPing, user);
 }
 
@@ -1621,7 +1860,7 @@ static void Vellum_FlushListCallbacks()
 		if (!req->used || req->notified || req->cb == NULL) {
 			continue;
 		}
-		if (req->ping_done < req->count) {
+		if (!req->master_done || req->ping_done < req->count) {
 			continue;
 		}
 		cb = (SteamServerListResponse *)req->cb;
