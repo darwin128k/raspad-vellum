@@ -1127,8 +1127,10 @@ static int Vellum_FillAuthTicket(void *pTicket, int cbMaxTicket, uint32 *pcbTick
 }
 
 #define VELLUM_FAV_MAX 64
-#define VELLUM_LIST_MAX 512
 #define VELLUM_REQ_MAX 16
+#define VELLUM_PING_SHIFT 20
+#define VELLUM_PING_ITEM (1 << 19)
+#define VELLUM_PING_INDEX ((1 << 19) - 1)
 
 enum {
 	VELLUM_LIST_FAV = 0,
@@ -1146,6 +1148,11 @@ struct VellumFav {
 	uint32 played;
 };
 
+struct VellumPendingAdr {
+	uint32 ip;
+	uint16 port;
+};
+
 struct VellumListReq {
 	int used;
 	int count;
@@ -1157,8 +1164,15 @@ struct VellumListReq {
 	int kind;
 	AppId_t app;
 	char filter[512];
+	int cap;
+	int pending_n;
+	int pending_cap;
+	int seen_n;
+	int seen_cap;
 	void *cb;
-	VellumGameServerItem items[VELLUM_LIST_MAX];
+	VellumGameServerItem *items;
+	VellumPendingAdr *pending;
+	uint64 *seen;
 };
 
 class SteamServerListResponse {
@@ -1181,6 +1195,186 @@ static int g_master_n;
 static int g_master_loaded;
 
 static int Vellum_FavFind(AppId_t app, uint32 ip, uint16 conn, uint16 query);
+
+static void Vellum_ListReqFree(VellumListReq *req)
+{
+	free(req->items);
+	free(req->pending);
+	free(req->seen);
+	req->items = NULL;
+	req->pending = NULL;
+	req->seen = NULL;
+	req->cap = 0;
+	req->pending_n = 0;
+	req->pending_cap = 0;
+	req->seen_n = 0;
+	req->seen_cap = 0;
+	req->count = 0;
+}
+
+static int Vellum_ListGrow(VellumListReq *req, int need)
+{
+	VellumGameServerItem *nitems;
+	int ncap;
+	if (need <= req->cap) {
+		return 1;
+	}
+	ncap = req->cap ? req->cap : 256;
+	while (ncap < need) {
+		if (ncap > VELLUM_PING_INDEX) {
+			return 0;
+		}
+		ncap *= 2;
+	}
+	nitems = (VellumGameServerItem *)realloc(req->items, (size_t)ncap * sizeof(*nitems));
+	if (nitems == NULL) {
+		return 0;
+	}
+	if (ncap > req->cap) {
+		memset(nitems + req->cap, 0, (size_t)(ncap - req->cap) * sizeof(*nitems));
+	}
+	req->items = nitems;
+	req->cap = ncap;
+	return 1;
+}
+
+static unsigned Vellum_SeenHash(uint64 key)
+{
+	return (unsigned)(key * 0x9E3779B97F4A7C15ull);
+}
+
+static int Vellum_SeenGrow(VellumListReq *req)
+{
+	int ncap = req->seen_cap ? req->seen_cap * 2 : 1024;
+	uint64 *nseen;
+	int i;
+	if (ncap < 1024) {
+		ncap = 1024;
+	}
+	nseen = (uint64 *)calloc((size_t)ncap, sizeof(uint64));
+	if (nseen == NULL) {
+		return 0;
+	}
+	for (i = 0; i < req->seen_cap; i++) {
+		uint64 k = req->seen[i];
+		unsigned j;
+		unsigned hash;
+		if (k == 0) {
+			continue;
+		}
+		hash = Vellum_SeenHash(k);
+		for (j = 0; j < (unsigned)ncap; j++) {
+			unsigned s = (hash + j) & (unsigned)(ncap - 1);
+			if (nseen[s] == 0) {
+				nseen[s] = k;
+				break;
+			}
+		}
+	}
+	free(req->seen);
+	req->seen = nseen;
+	req->seen_cap = ncap;
+	return 1;
+}
+
+static uint64 Vellum_SeenKey(uint32 ip, uint16 port)
+{
+	uint64 key = ((uint64)ip << 16) | (uint64)port;
+	return key ? key : 1;
+}
+
+static int Vellum_SeenHas(VellumListReq *req, uint32 ip, uint16 port)
+{
+	uint64 key = Vellum_SeenKey(ip, port);
+	unsigned cap;
+	unsigned hash;
+	unsigned j;
+	if (req->seen == NULL || req->seen_cap <= 0) {
+		return 0;
+	}
+	cap = (unsigned)req->seen_cap;
+	hash = Vellum_SeenHash(key);
+	for (j = 0; j < cap; j++) {
+		unsigned s = (hash + j) & (cap - 1);
+		if (req->seen[s] == 0) {
+			return 0;
+		}
+		if (req->seen[s] == key) {
+			return 1;
+		}
+	}
+	return 0;
+}
+
+static void Vellum_SeenAdd(VellumListReq *req, uint32 ip, uint16 port)
+{
+	uint64 key = Vellum_SeenKey(ip, port);
+	unsigned cap;
+	unsigned hash;
+	unsigned j;
+	if (req->seen_n * 2 >= req->seen_cap && !Vellum_SeenGrow(req)) {
+		return;
+	}
+	if (req->seen == NULL || req->seen_cap <= 0) {
+		return;
+	}
+	cap = (unsigned)req->seen_cap;
+	hash = Vellum_SeenHash(key);
+	for (j = 0; j < cap; j++) {
+		unsigned s = (hash + j) & (cap - 1);
+		if (req->seen[s] == 0) {
+			req->seen[s] = key;
+			req->seen_n++;
+			return;
+		}
+		if (req->seen[s] == key) {
+			return;
+		}
+	}
+}
+
+static void Vellum_ListReqResetCount(VellumListReq *req)
+{
+	req->count = 0;
+	req->pending_n = 0;
+	req->ping_next = 0;
+	req->ping_done = 0;
+	req->seen_n = 0;
+	if (req->seen != NULL && req->seen_cap > 0) {
+		memset(req->seen, 0, (size_t)req->seen_cap * sizeof(uint64));
+	}
+}
+
+static int Vellum_ListUsesPending(const VellumListReq *req)
+{
+	return req->kind == VELLUM_LIST_INTERNET || req->kind == VELLUM_LIST_LAN;
+}
+
+static int Vellum_PendingGrow(VellumListReq *req, int need)
+{
+	VellumPendingAdr *npend;
+	int ncap;
+	if (need <= req->pending_cap) {
+		return 1;
+	}
+	ncap = req->pending_cap ? req->pending_cap : 256;
+	while (ncap < need) {
+		if (ncap > VELLUM_PING_INDEX) {
+			return 0;
+		}
+		ncap *= 2;
+	}
+	npend = (VellumPendingAdr *)realloc(req->pending, (size_t)ncap * sizeof(*npend));
+	if (npend == NULL) {
+		return 0;
+	}
+	if (ncap > req->pending_cap) {
+		memset(npend + req->pending_cap, 0, (size_t)(ncap - req->pending_cap) * sizeof(*npend));
+	}
+	req->pending = npend;
+	req->pending_cap = ncap;
+	return 1;
+}
 
 static void Vellum_GameDir(char *dir, size_t dirSize)
 {
@@ -1728,6 +1922,7 @@ static VellumListReq *Vellum_AllocReq(void *response)
 		req = &g_reqs[VELLUM_REQ_MAX - 1];
 	}
 	Vellum_MasterCancel(req);
+	Vellum_ListReqFree(req);
 	memset(req, 0, sizeof(*req));
 	req->used = 1;
 	req->cb = response;
@@ -1737,7 +1932,6 @@ static VellumListReq *Vellum_AllocReq(void *response)
 static void Vellum_OnMaster(void *user, uint32 ip, uint16 port, int finished)
 {
 	VellumListReq *req = (VellumListReq *)user;
-	int i;
 	if (req == NULL || !req->used) {
 		return;
 	}
@@ -1748,28 +1942,23 @@ static void Vellum_OnMaster(void *user, uint32 ip, uint16 port, int finished)
 		if (req->master_pending <= 0) {
 			req->master_done = 1;
 		}
-		Vellum_Log("Master source done pending=%d count=%d", req->master_pending, req->count);
+		Vellum_Log("Master source done pending=%d queued=%d live=%d", req->master_pending, req->pending_n, req->count);
 		return;
 	}
-	if (req->count >= VELLUM_LIST_MAX) {
+	if (Vellum_SeenHas(req, ip, port)) {
+		return;
+	}
+	if (!Vellum_PendingGrow(req, req->pending_n + 1)) {
 		Vellum_MasterCancel(req);
 		req->master_pending = 0;
 		req->master_done = 1;
+		Vellum_Log("Master pending grow fail n=%d", req->pending_n);
 		return;
 	}
-	for (i = 0; i < req->count; i++) {
-		if (req->items[i].adr.ip == ip && req->items[i].adr.conn == port) {
-			return;
-		}
-	}
-	Vellum_FillItemAdr(&req->items[req->count], ip, port, req->app);
-	req->count++;
-	{
-		SteamServerListResponse *cb = (SteamServerListResponse *)req->cb;
-		if (cb != NULL) {
-			cb->ServerResponded((HServerListRequest)req, req->count - 1);
-		}
-	}
+	Vellum_SeenAdd(req, ip, port);
+	req->pending[req->pending_n].ip = ip;
+	req->pending[req->pending_n].port = port;
+	req->pending_n++;
 }
 
 static void Vellum_AppendFilter(char *out, size_t n, const char *key, const char *val)
@@ -1875,6 +2064,9 @@ static HServerListRequest Vellum_ListRequest(AppId_t app, uint32 flagMask, void 
 		if (flagMask != 0 && (g_favs[i].flags & flagMask) == 0) {
 			continue;
 		}
+		if (!Vellum_ListGrow(req, req->count + 1)) {
+			break;
+		}
 		Vellum_FillItem(&req->items[req->count], &g_favs[i]);
 		req->count++;
 	}
@@ -1950,7 +2142,7 @@ static void Vellum_ListRelease(HServerListRequest h)
 			req->cb = NULL;
 			req->notified = 1;
 			req->used = 0;
-			req->count = 0;
+			Vellum_ListReqFree(req);
 			return;
 		}
 	}
@@ -1981,11 +2173,11 @@ static void Vellum_RefreshListQuery(HServerListRequest h)
 	req->ping_done = 0;
 	req->notified = 0;
 	if (req->kind == VELLUM_LIST_INTERNET) {
-		req->count = 0;
+		Vellum_ListReqResetCount(req);
 		Vellum_MasterCancel(req);
 		Vellum_StartInternetMasters(req);
 	} else if (req->kind == VELLUM_LIST_LAN) {
-		req->count = 0;
+		Vellum_ListReqResetCount(req);
 		req->master_done = 0;
 		if (!Vellum_LanStart(Vellum_OnMaster, req)) {
 			req->master_done = 1;
@@ -2002,58 +2194,95 @@ static bool Vellum_ListIsRefreshing(HServerListRequest h)
 	if (!req->master_done) {
 		return true;
 	}
+	if (Vellum_ListUsesPending(req)) {
+		return req->ping_done < req->pending_n;
+	}
 	return req->ping_done < req->count;
 }
 
 static void Vellum_OnListPing(void *user, int ok, const VellumGameServerItem *item)
 {
 	size_t u = (size_t)user;
-	int r = (int)(u / VELLUM_LIST_MAX);
-	int i = (int)(u % VELLUM_LIST_MAX);
+	int r = (int)(u >> VELLUM_PING_SHIFT);
+	int from_item = ((int)u & VELLUM_PING_ITEM) != 0;
+	int i = (int)u & VELLUM_PING_INDEX;
 	VellumListReq *req;
 	SteamServerListResponse *cb;
 	if (r < 0 || r >= VELLUM_REQ_MAX) {
 		return;
 	}
 	req = &g_reqs[r];
-	if (!req->used || i < 0 || i >= req->count) {
+	if (!req->used) {
 		return;
 	}
-	if (req->ping_done < req->count) {
+	cb = (SteamServerListResponse *)req->cb;
+	if (from_item) {
+		if (i < 0 || i >= req->count) {
+			return;
+		}
+		if (!Vellum_ListUsesPending(req) && req->ping_done < req->count) {
+			req->ping_done++;
+		}
+		if (ok && item != NULL) {
+			req->items[i].ping = item->ping;
+			req->items[i].players = item->players;
+			req->items[i].maxPlayers = item->maxPlayers ? item->maxPlayers : req->items[i].maxPlayers;
+			req->items[i].bots = item->bots;
+			req->items[i].password = item->password;
+			req->items[i].secure = item->secure;
+			req->items[i].hadResponse = true;
+			if (item->name[0]) {
+				strncpy(req->items[i].name, item->name, sizeof(req->items[i].name) - 1);
+				req->items[i].name[sizeof(req->items[i].name) - 1] = '\0';
+			}
+			if (item->map[0]) {
+				strncpy(req->items[i].map, item->map, sizeof(req->items[i].map) - 1);
+				req->items[i].map[sizeof(req->items[i].map) - 1] = '\0';
+			}
+			if (item->gameDir[0]) {
+				strncpy(req->items[i].gameDir, item->gameDir, sizeof(req->items[i].gameDir) - 1);
+				req->items[i].gameDir[sizeof(req->items[i].gameDir) - 1] = '\0';
+			}
+			if (item->desc[0]) {
+				strncpy(req->items[i].desc, item->desc, sizeof(req->items[i].desc) - 1);
+				req->items[i].desc[sizeof(req->items[i].desc) - 1] = '\0';
+			}
+		}
+		if (cb != NULL) {
+			if (ok) {
+				cb->ServerResponded((HServerListRequest)req, i);
+			} else {
+				cb->ServerFailedToRespond((HServerListRequest)req, i);
+			}
+		}
+		return;
+	}
+	if (i < 0 || i >= req->pending_n) {
+		return;
+	}
+	if (req->ping_done < req->pending_n) {
 		req->ping_done++;
 	}
-	if (ok && item != NULL) {
-		req->items[i].ping = item->ping;
-		req->items[i].players = item->players;
-		req->items[i].maxPlayers = item->maxPlayers ? item->maxPlayers : req->items[i].maxPlayers;
-		req->items[i].bots = item->bots;
-		req->items[i].password = item->password;
-		req->items[i].secure = item->secure;
-		req->items[i].hadResponse = true;
-		if (item->name[0]) {
-			strncpy(req->items[i].name, item->name, sizeof(req->items[i].name) - 1);
-			req->items[i].name[sizeof(req->items[i].name) - 1] = '\0';
-		}
-		if (item->map[0]) {
-			strncpy(req->items[i].map, item->map, sizeof(req->items[i].map) - 1);
-			req->items[i].map[sizeof(req->items[i].map) - 1] = '\0';
-		}
-		if (item->gameDir[0]) {
-			strncpy(req->items[i].gameDir, item->gameDir, sizeof(req->items[i].gameDir) - 1);
-			req->items[i].gameDir[sizeof(req->items[i].gameDir) - 1] = '\0';
-		}
-		if (item->desc[0]) {
-			strncpy(req->items[i].desc, item->desc, sizeof(req->items[i].desc) - 1);
-			req->items[i].desc[sizeof(req->items[i].desc) - 1] = '\0';
-		}
+	if (!ok || item == NULL) {
+		return;
 	}
-	cb = (SteamServerListResponse *)req->cb;
+	if (!Vellum_ListGrow(req, req->count + 1)) {
+		return;
+	}
+	req->items[req->count] = *item;
+	req->items[req->count].hadResponse = true;
+	if (req->items[req->count].adr.ip == 0) {
+		req->items[req->count].adr.ip = req->pending[i].ip;
+		req->items[req->count].adr.conn = req->pending[i].port;
+		req->items[req->count].adr.query = req->pending[i].port;
+	}
+	req->count++;
 	if (cb != NULL) {
-		cb->ServerResponded((HServerListRequest)req, i);
+		cb->ServerResponded((HServerListRequest)req, req->count - 1);
 	}
-	if (i < 8 || (i % 50) == 0) {
-		Vellum_Log("ListPing i=%d ok=%d map=%s game=%s players=%d ping=%d",
-		           i, ok, req->items[i].map, req->items[i].desc, req->items[i].players, req->items[i].ping);
+	if (req->count <= 8 || (req->count % 500) == 0) {
+		Vellum_Log("ListPing live=%d queued=%d done=%d map=%s game=%s players=%d ping=%d",
+		           req->count, req->pending_n, req->ping_done, item->map, item->desc, item->players, item->ping);
 	}
 }
 
@@ -2065,15 +2294,31 @@ static void Vellum_StartListPings()
 		if (!req->used) {
 			continue;
 		}
+		if (Vellum_ListUsesPending(req)) {
+			while (req->ping_next < req->pending_n) {
+				int i = req->ping_next;
+				uint16 port = req->pending[i].port;
+				void *user = (void *)(size_t)(((size_t)r << VELLUM_PING_SHIFT) | (size_t)i);
+				if (Vellum_QueryInfo(req->pending[i].ip, port, Vellum_OnListPing, user) == 0) {
+					break;
+				}
+				req->ping_next++;
+				if (i == 0 || (i % 500) == 0) {
+					Vellum_Log("ListPingStart queued=%d live=%d ip=%u port=%u",
+					           i, req->count, req->pending[i].ip, (unsigned)port);
+				}
+			}
+			continue;
+		}
 		while (req->ping_next < req->count) {
 			int i = req->ping_next;
 			uint16 port = req->items[i].adr.query ? req->items[i].adr.query : req->items[i].adr.conn;
-			void *user = (void *)(size_t)(r * VELLUM_LIST_MAX + i);
+			void *user = (void *)(size_t)(((size_t)r << VELLUM_PING_SHIFT) | (size_t)VELLUM_PING_ITEM | (size_t)i);
 			if (Vellum_QueryInfo(req->items[i].adr.ip, port, Vellum_OnListPing, user) == 0) {
 				break;
 			}
 			req->ping_next++;
-			if (i == 0 || (i % 50) == 0) {
+			if (i == 0 || (i % 500) == 0) {
 				Vellum_Log("ListPingStart i=%d ip=%u port=%u", i, req->items[i].adr.ip, (unsigned)port);
 			}
 		}
@@ -2094,7 +2339,7 @@ static void Vellum_RefreshListServer(HServerListRequest h, int i)
 		return;
 	}
 	port = req->items[i].adr.query ? req->items[i].adr.query : req->items[i].adr.conn;
-	user = (void *)(size_t)(r * VELLUM_LIST_MAX + i);
+	user = (void *)(size_t)(((size_t)r << VELLUM_PING_SHIFT) | (size_t)VELLUM_PING_ITEM | (size_t)i);
 	Vellum_QueryInfo(req->items[i].adr.ip, port, Vellum_OnListPing, user);
 }
 
@@ -2107,16 +2352,23 @@ static void Vellum_FlushListCallbacks()
 	for (r = 0; r < VELLUM_REQ_MAX; r++) {
 		VellumListReq *req = &g_reqs[r];
 		SteamServerListResponse *cb;
+		int pings_left;
 		if (!req->used || req->notified || req->cb == NULL) {
 			continue;
 		}
-		if (!req->master_done || req->ping_done < req->count) {
+		if (!req->master_done) {
+			continue;
+		}
+		pings_left = Vellum_ListUsesPending(req) ? (req->ping_done < req->pending_n)
+		                                         : (req->ping_done < req->count);
+		if (pings_left) {
 			continue;
 		}
 		cb = (SteamServerListResponse *)req->cb;
 		req->notified = 1;
 		cb->RefreshComplete((HServerListRequest)req, req->count ? 0 : 2);
-		Vellum_Log("list done kind=%d count=%d pings=%d", req->kind, req->count, req->ping_done);
+		Vellum_Log("list done kind=%d live=%d queued=%d pings=%d",
+		           req->kind, req->count, req->pending_n, req->ping_done);
 	}
 }
 

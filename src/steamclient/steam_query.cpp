@@ -38,7 +38,7 @@ typedef int SOCKET;
 #define Vellum_StrNicmp strncasecmp
 #endif
 
-#define VELLUM_QUERY_MAX 48
+#define VELLUM_QUERY_MAX 256
 #define VELLUM_QUERY_TIMEOUT 3000
 #define VELLUM_MASTER_MAX 8
 #define VELLUM_MASTER_TIMEOUT 4000
@@ -628,9 +628,10 @@ struct VellumHttpList {
 	volatile int abort;
 	volatile int done;
 	int n;
+	int cap;
 	int read;
-	uint32 ips[512];
-	uint16 ports[512];
+	uint32 *ips;
+	uint16 *ports;
 	char url[512];
 	VellumMasterCb cb;
 	void *user;
@@ -892,17 +893,16 @@ static void Vellum_LanThink()
 	}
 }
 
-static int Vellum_ParseDottedAddr(const char *s, uint32 *ip, uint16 *port)
+static int Vellum_ParseIpv4(const char *s, uint32 *ip)
 {
-	unsigned a = 0, b = 0, c = 0, d = 0, p = 0;
-	if (s == NULL || sscanf(s, "%u.%u.%u.%u:%u", &a, &b, &c, &d, &p) != 5) {
+	unsigned a = 0, b = 0, c = 0, d = 0;
+	if (s == NULL || sscanf(s, "%u.%u.%u.%u", &a, &b, &c, &d) != 4) {
 		return 0;
 	}
-	if (a > 255 || b > 255 || c > 255 || d > 255 || p > 65535) {
+	if (a > 255 || b > 255 || c > 255 || d > 255) {
 		return 0;
 	}
 	*ip = (a << 24) | (b << 16) | (c << 8) | d;
-	*port = (uint16)p;
 	return 1;
 }
 
@@ -1132,10 +1132,40 @@ static int Vellum_HttpListFetch(VellumHttpList *h, const char *url, char **out, 
 }
 #endif
 
+static int Vellum_HttpListGrow(VellumHttpList *h, int need)
+{
+	uint32 *nips;
+	uint16 *nports;
+	int ncap;
+	if (need <= h->cap) {
+		return 1;
+	}
+	ncap = h->cap ? h->cap : 256;
+	while (ncap < need) {
+		if (ncap > 1000000) {
+			return 0;
+		}
+		ncap *= 2;
+	}
+	nips = (uint32 *)realloc(h->ips, (size_t)ncap * sizeof(uint32));
+	if (nips == NULL) {
+		return 0;
+	}
+	nports = (uint16 *)realloc(h->ports, (size_t)ncap * sizeof(uint16));
+	if (nports == NULL) {
+		h->ips = nips;
+		return 0;
+	}
+	h->ips = nips;
+	h->ports = nports;
+	h->cap = ncap;
+	return 1;
+}
+
 static void Vellum_HttpListPush(VellumHttpList *h, uint32 ip, uint16 port)
 {
 	Vellum_HttpListLock(h);
-	if (h->n < 512) {
+	if (Vellum_HttpListGrow(h, h->n + 1)) {
 		h->ips[h->n] = ip;
 		h->ports[h->n] = port;
 		h->n++;
@@ -1143,54 +1173,55 @@ static void Vellum_HttpListPush(VellumHttpList *h, uint32 ip, uint16 port)
 	Vellum_HttpListUnlock(h);
 }
 
+static int Vellum_CountSub(const char *s, const char *sub)
+{
+	int n = 0;
+	size_t sl;
+	if (s == NULL || sub == NULL || sub[0] == '\0') {
+		return 0;
+	}
+	sl = strlen(sub);
+	while ((s = strstr(s, sub)) != NULL) {
+		n++;
+		s += sl;
+	}
+	return n;
+}
+
 static int Vellum_HttpListParse(const char *json, VellumHttpList *h)
 {
 	const char *p = json;
 	int added = 0;
-	while (p != NULL && *p) {
-		const char *a = strstr(p, "\"connect\"");
-		const char *b = strstr(p, "\"addr\":");
-		const char *hit;
-		char addr[64];
+	if (json == NULL) {
+		return 0;
+	}
+	while ((p = strstr(p, "\"ip\":\"")) != NULL) {
+		char ipstr[32];
+		const char *q;
 		int n = 0;
 		uint32 ip = 0;
-		uint16 port = 0;
-		if (a != NULL && b != NULL) {
-			hit = a < b ? a : b;
-		} else {
-			hit = a ? a : b;
+		unsigned port = 0;
+		p += 6;
+		while (*p && *p != '"' && n < (int)sizeof(ipstr) - 1) {
+			ipstr[n++] = *p++;
 		}
-		if (hit == NULL) {
-			break;
+		ipstr[n] = '\0';
+		if (!Vellum_ParseIpv4(ipstr, &ip)) {
+			continue;
 		}
-		p = hit;
-		while (*p && *p != ':') {
-			p++;
+		q = strstr(p, "\"port\":");
+		if (q == NULL || q > p + 160) {
+			continue;
 		}
-		if (*p == ':') {
-			p++;
+		port = (unsigned)atoi(q + 7);
+		if (port == 0 || port > 65535) {
+			continue;
 		}
-		while (*p && *p != '"') {
-			p++;
-		}
-		if (*p != '"') {
-			break;
-		}
-		p++;
-		while (*p && *p != '"' && n < (int)sizeof(addr) - 1) {
-			addr[n++] = *p++;
-		}
-		addr[n] = '\0';
 		if (h->abort) {
 			break;
 		}
-		if (*p == '"') {
-			p++;
-		}
-		if (Vellum_ParseDottedAddr(addr, &ip, &port)) {
-			Vellum_HttpListPush(h, ip, port);
-			added++;
-		}
+		Vellum_HttpListPush(h, ip, port);
+		added++;
 	}
 	return added;
 }
@@ -1225,20 +1256,25 @@ static void *Vellum_HttpListWorker(void *param)
 	int offset;
 	int added_total = 0;
 	int paged = strstr(h->url, "{offset}") != NULL;
-	for (offset = 0; offset < 500 && !h->abort; offset += 100) {
+	for (offset = 0; offset < 100000 && !h->abort; offset += 100) {
 		char url[768];
 		char *body = NULL;
 		int n = 0;
 		int added;
+		int page_items;
 		Vellum_HttpListMakeUrl(url, (int)sizeof(url), h->url, offset);
 		if (!Vellum_HttpListFetch(h, url, &body, &n) || body == NULL) {
 			Vellum_Log("HttpList fetch fail offset=%d url=%.180s", offset, url);
 			break;
 		}
+		page_items = Vellum_CountSub(body, "\"connect\"");
 		added = Vellum_HttpListParse(body, h);
 		free(body);
 		added_total += added;
-		if (!paged || added < 100) {
+		if (offset == 0 || page_items < 100 || (offset % 1000) == 0) {
+			Vellum_Log("HttpList page offset=%d json=%d parsed=%d total=%d", offset, page_items, added, h->n);
+		}
+		if (!paged || page_items < 100) {
 			break;
 		}
 	}
@@ -1263,6 +1299,13 @@ static void Vellum_HttpListFinish(VellumHttpList *h)
 #endif
 		h->lock_ready = 0;
 	}
+	free(h->ips);
+	free(h->ports);
+	h->ips = NULL;
+	h->ports = NULL;
+	h->cap = 0;
+	h->n = 0;
+	h->read = 0;
 	h->used = 0;
 	h->cb = NULL;
 	h->user = NULL;
@@ -1309,17 +1352,21 @@ static void Vellum_HttpListThink()
 			continue;
 		}
 		Vellum_HttpListLock(h);
-		while (h->read < h->n) {
-			uint32 ip = h->ips[h->read];
-			uint16 port = h->ports[h->read];
-			h->read++;
-			Vellum_HttpListUnlock(h);
-			if (h->cb != NULL) {
-				h->cb(h->user, ip, port, 0);
+		{
+			int drained = 0;
+			while (h->read < h->n && drained < 256) {
+				uint32 ip = h->ips[h->read];
+				uint16 port = h->ports[h->read];
+				h->read++;
+				drained++;
+				Vellum_HttpListUnlock(h);
+				if (h->cb != NULL) {
+					h->cb(h->user, ip, port, 0);
+				}
+				Vellum_HttpListLock(h);
 			}
-			Vellum_HttpListLock(h);
 		}
-		done = h->done;
+		done = h->done && h->read >= h->n;
 		Vellum_HttpListUnlock(h);
 #ifdef _WIN32
 		if (!done && h->abort && h->thread_ready &&
