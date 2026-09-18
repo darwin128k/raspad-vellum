@@ -46,6 +46,11 @@ if (MSVC)
     target_compile_options(steamclient PRIVATE /utf-8)
 endif()
 
+if(VELLUM_NO_SERVER_BROWSER)
+    target_compile_definitions(steamclient PRIVATE VELLUM_NO_SERVER_BROWSER)
+    message(STATUS "vellum: Internet server browser disabled (no master.vdf)")
+endif()
+
 set_target_properties(steamclient PROPERTIES
     OUTPUT_NAME steamclient
     PREFIX ""

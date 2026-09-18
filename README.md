@@ -119,6 +119,8 @@ One loader instance at a time. Optional `-launch` / `-appid`. Default game is `c
 
 Release builds write no `vellum.log`. Debug (`build.bat debug`) logs a timestamped session: identity, interfaces, connect ticket, master list, and voice tx/rx.
 
+CMake `-DVELLUM_NO_SERVER_BROWSER=ON` skips `config/master.vdf` so the Internet tab stays empty. Default is **OFF** (search enabled). Favorites and LAN are unchanged. This is for a later one-server build that will not ship a public browser.
+
 ## License
 
 MIT. See [LICENSE](LICENSE).

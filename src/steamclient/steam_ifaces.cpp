@@ -1530,6 +1530,14 @@ static void Vellum_MasterLoadFile(const char *path)
 
 static void Vellum_MasterLoad()
 {
+#ifdef VELLUM_NO_SERVER_BROWSER
+	if (g_master_loaded) {
+		return;
+	}
+	g_master_loaded = 1;
+	g_master_n = 0;
+	Vellum_Log("master search disabled");
+#else
 	char path[512];
 	FILE *probe;
 	int i;
@@ -1551,6 +1559,7 @@ static void Vellum_MasterLoad()
 	for (i = 0; i < g_master_n; i++) {
 		Vellum_Log("master [%d] %s", i + 1, g_master_addrs[i]);
 	}
+#endif
 }
 
 static int Vellum_FavFind(AppId_t app, uint32 ip, uint16 conn, uint16 query)
