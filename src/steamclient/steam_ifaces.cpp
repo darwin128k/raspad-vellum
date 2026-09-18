@@ -1388,9 +1388,9 @@ static void Vellum_MasterPath(char *path, size_t pathSize)
 	char dir[512];
 	Vellum_GameDir(dir, sizeof(dir));
 #ifdef _WIN32
-	_snprintf(path, pathSize, "%sconfig\\master.vdf", dir);
+	_snprintf(path, pathSize, "%sconfig\\masterserver.vdf", dir);
 #else
-	snprintf(path, pathSize, "%sconfig/master.vdf", dir);
+	snprintf(path, pathSize, "%sconfig/masterserver.vdf", dir);
 #endif
 	path[pathSize - 1] = '\0';
 }

@@ -23,7 +23,7 @@ either spawns that `hl` binary (loader) or compiles `src/launcher.cpp` from
 ## Modes
 
 **Loader (default).** Steam environment in this process, then run `hl.exe -game cstrike`
-(Linux: `./hl -game cstrike`). The loader pid stays the "live Steam".
+(Linux: `./hl_linux -game cstrike`). The loader pid stays the "live Steam".
 
 - Windows: named mapping/event, registry `ActiveProcess`, `CreateProcess`.
 - Linux: `SteamAppId`, a private `$HOME/.steam/sdk32` that points at our

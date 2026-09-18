@@ -17,15 +17,20 @@
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <netdb.h>
 #include <netinet/in.h>
+#include <pthread.h>
 #include <strings.h>
 #include <sys/socket.h>
+#include <sys/types.h>
 #include <unistd.h>
 typedef int SOCKET;
 #define INVALID_SOCKET (-1)
 #define SOCKET_ERROR (-1)
 #define closesocket close
 #endif
+
+#include "steam_http.h"
 
 #ifdef _WIN32
 #define Vellum_StrNicmp _strnicmp
@@ -492,9 +497,7 @@ static void Vellum_HandlePkt(VellumQuery *q, uint8 *p, int n)
 
 static void Vellum_MasterThink();
 static void Vellum_LanThink();
-#ifdef _WIN32
 static void Vellum_HttpListThink();
-#endif
 
 void Vellum_QueryThink()
 {
@@ -518,9 +521,7 @@ void Vellum_QueryThink()
 	}
 	Vellum_MasterThink();
 	Vellum_LanThink();
-#ifdef _WIN32
 	Vellum_HttpListThink();
-#endif
 }
 
 HServerQuery Vellum_QueryPing(uint32 ip, uint16 port, void *cb)
@@ -622,11 +623,10 @@ struct VellumLan {
 	void *user;
 };
 
-#ifdef _WIN32
 struct VellumHttpList {
 	int used;
-	int abort;
-	int done;
+	volatile int abort;
+	volatile int done;
 	int n;
 	int read;
 	uint32 ips[512];
@@ -634,17 +634,16 @@ struct VellumHttpList {
 	char url[512];
 	VellumMasterCb cb;
 	void *user;
+#ifdef _WIN32
 	HANDLE thread;
 	CRITICAL_SECTION lock;
-	int lock_ready;
-};
 #else
-struct VellumHttpList {
-	int used;
-	VellumMasterCb cb;
-	void *user;
-};
+	pthread_t thread;
+	pthread_mutex_t lock;
 #endif
+	int lock_ready;
+	int thread_ready;
+};
 
 static VellumMaster g_masters[VELLUM_MASTER_MAX];
 static VellumLan g_lans[VELLUM_MASTER_MAX];
@@ -890,7 +889,6 @@ static void Vellum_LanThink()
 	}
 }
 
-#ifdef _WIN32
 static int Vellum_ParseDottedAddr(const char *s, uint32 *ip, uint16 *port)
 {
 	unsigned a = 0, b = 0, c = 0, d = 0, p = 0;
@@ -905,6 +903,25 @@ static int Vellum_ParseDottedAddr(const char *s, uint32 *ip, uint16 *port)
 	return 1;
 }
 
+static void Vellum_HttpListLock(VellumHttpList *h)
+{
+#ifdef _WIN32
+	EnterCriticalSection(&h->lock);
+#else
+	pthread_mutex_lock(&h->lock);
+#endif
+}
+
+static void Vellum_HttpListUnlock(VellumHttpList *h)
+{
+#ifdef _WIN32
+	LeaveCriticalSection(&h->lock);
+#else
+	pthread_mutex_unlock(&h->lock);
+#endif
+}
+
+#ifdef _WIN32
 static int Vellum_HttpListFetch(const char *url, char **out, int *outn)
 {
 	HINTERNET ses;
@@ -962,16 +979,44 @@ static int Vellum_HttpListFetch(const char *url, char **out, int *outn)
 	*outn = n;
 	return 1;
 }
+#else
+static int Vellum_HttpListFetch(VellumHttpList *h, const char *url, char **out, int *outn)
+{
+	uint8 *body = NULL;
+	uint32 n = 0;
+	uint32 status = 0;
+	char *text;
+	*out = NULL;
+	*outn = 0;
+	if (h == NULL || url == NULL || url[0] == '\0') {
+		return 0;
+	}
+	if (!Vellum_NetHttpGet(url, "VellumServerBrowser/1.0", 20, 0, &body, &n, &status, &h->abort) ||
+	    body == NULL) {
+		free(body);
+		return 0;
+	}
+	text = (char *)realloc(body, (size_t)n + 1);
+	if (text == NULL) {
+		free(body);
+		return 0;
+	}
+	text[n] = '\0';
+	*out = text;
+	*outn = (int)n;
+	return 1;
+}
+#endif
 
 static void Vellum_HttpListPush(VellumHttpList *h, uint32 ip, uint16 port)
 {
-	EnterCriticalSection(&h->lock);
+	Vellum_HttpListLock(h);
 	if (h->n < 512) {
 		h->ips[h->n] = ip;
 		h->ports[h->n] = port;
 		h->n++;
 	}
-	LeaveCriticalSection(&h->lock);
+	Vellum_HttpListUnlock(h);
 }
 
 static int Vellum_HttpListParse(const char *json, VellumHttpList *h)
@@ -1046,7 +1091,11 @@ static void Vellum_HttpListMakeUrl(char *out, int outn, const char *tmpl, int of
 	out[outn - 1] = '\0';
 }
 
+#ifdef _WIN32
 static DWORD WINAPI Vellum_HttpListWorker(LPVOID param)
+#else
+static void *Vellum_HttpListWorker(void *param)
+#endif
 {
 	VellumHttpList *h = (VellumHttpList *)param;
 	int offset;
@@ -1058,7 +1107,12 @@ static DWORD WINAPI Vellum_HttpListWorker(LPVOID param)
 		int n = 0;
 		int added;
 		Vellum_HttpListMakeUrl(url, (int)sizeof(url), h->url, offset);
+#ifdef _WIN32
 		if (!Vellum_HttpListFetch(url, &body, &n) || body == NULL) {
+#else
+		if (!Vellum_HttpListFetch(h, url, &body, &n) || body == NULL) {
+#endif
+			Vellum_Log("HttpList fetch fail offset=%d", offset);
 			break;
 		}
 		added = Vellum_HttpListParse(body, h);
@@ -1068,23 +1122,36 @@ static DWORD WINAPI Vellum_HttpListWorker(LPVOID param)
 			break;
 		}
 	}
-	EnterCriticalSection(&h->lock);
+	Vellum_HttpListLock(h);
 	h->done = 1;
-	LeaveCriticalSection(&h->lock);
+	Vellum_HttpListUnlock(h);
 	Vellum_Log("HttpList done added=%d abort=%d", added_total, h->abort);
+#ifdef _WIN32
 	return 0;
+#else
+	return NULL;
+#endif
 }
 
 static void Vellum_HttpListClose(VellumHttpList *h)
 {
 	h->abort = 1;
-	if (h->thread) {
+	if (h->thread_ready) {
+#ifdef _WIN32
 		WaitForSingleObject(h->thread, 8000);
 		CloseHandle(h->thread);
 		h->thread = NULL;
+#else
+		pthread_join(h->thread, NULL);
+#endif
+		h->thread_ready = 0;
 	}
 	if (h->lock_ready) {
+#ifdef _WIN32
 		DeleteCriticalSection(&h->lock);
+#else
+		pthread_mutex_destroy(&h->lock);
+#endif
 		h->lock_ready = 0;
 	}
 	h->used = 0;
@@ -1101,19 +1168,19 @@ static void Vellum_HttpListThink()
 		if (!h->used) {
 			continue;
 		}
-		EnterCriticalSection(&h->lock);
+		Vellum_HttpListLock(h);
 		while (h->read < h->n) {
 			uint32 ip = h->ips[h->read];
 			uint16 port = h->ports[h->read];
 			h->read++;
-			LeaveCriticalSection(&h->lock);
+			Vellum_HttpListUnlock(h);
 			if (h->cb != NULL) {
 				h->cb(h->user, ip, port, 0);
 			}
-			EnterCriticalSection(&h->lock);
+			Vellum_HttpListLock(h);
 		}
 		done = h->done;
-		LeaveCriticalSection(&h->lock);
+		Vellum_HttpListUnlock(h);
 		if (done) {
 			VellumMasterCb cb = h->cb;
 			void *user = h->user;
@@ -1142,12 +1209,19 @@ static int Vellum_HttpListStart(const char *url, VellumMasterCb cb, void *user)
 		return 0;
 	}
 	memset(h, 0, sizeof(*h));
+#ifdef _WIN32
 	InitializeCriticalSection(&h->lock);
+#else
+	if (pthread_mutex_init(&h->lock, NULL) != 0) {
+		return 0;
+	}
+#endif
 	h->lock_ready = 1;
 	h->used = 1;
 	h->cb = cb;
 	h->user = user;
 	strncpy(h->url, url, sizeof(h->url) - 1);
+#ifdef _WIN32
 	h->thread = CreateThread(NULL, 0, Vellum_HttpListWorker, h, 0, NULL);
 	if (h->thread == NULL) {
 		DeleteCriticalSection(&h->lock);
@@ -1155,10 +1229,18 @@ static int Vellum_HttpListStart(const char *url, VellumMasterCb cb, void *user)
 		h->used = 0;
 		return 0;
 	}
+#else
+	if (pthread_create(&h->thread, NULL, Vellum_HttpListWorker, h) != 0) {
+		pthread_mutex_destroy(&h->lock);
+		h->lock_ready = 0;
+		h->used = 0;
+		return 0;
+	}
+#endif
+	h->thread_ready = 1;
 	Vellum_Log("HttpList start %s", h->url);
 	return 1;
 }
-#endif
 
 static int Vellum_SplitHostPort(const char *addr, char *host, size_t hostn, uint16 *port)
 {
@@ -1199,12 +1281,8 @@ int Vellum_MasterAdd(const char *address, const char *filter, VellumMasterCb cb,
 		return 0;
 	}
 	if (Vellum_StrNicmp(address, "http://", 7) == 0 || Vellum_StrNicmp(address, "https://", 8) == 0) {
-#ifdef _WIN32
-		return Vellum_HttpListStart(address, cb, user);
-#else
 		(void)filter;
-		return 0;
-#endif
+		return Vellum_HttpListStart(address, cb, user);
 	}
 	if (!Vellum_SplitHostPort(address, host, sizeof(host), &port)) {
 		return 0;
@@ -1259,10 +1337,8 @@ void Vellum_MasterCancel(void *user)
 		if (g_lans[i].used && g_lans[i].user == user) {
 			Vellum_LanClose(&g_lans[i]);
 		}
-#ifdef _WIN32
 		if (g_httplists[i].used && g_httplists[i].user == user) {
 			Vellum_HttpListClose(&g_httplists[i]);
 		}
-#endif
 	}
 }

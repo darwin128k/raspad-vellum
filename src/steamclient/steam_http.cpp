@@ -10,6 +10,10 @@
 #endif
 #include <windows.h>
 #include <wininet.h>
+#else
+#include <dlfcn.h>
+#include <pthread.h>
+#include <unistd.h>
 #endif
 
 #define VELLUM_HTTP_MAX 8
@@ -51,10 +55,10 @@ struct VellumHttpHdr {
 struct VellumHttpReq {
 	int used;
 	int sent;
-	int done;
+	volatile int done;
 	int notified;
 	int timed_out;
-	int abort;
+	volatile int abort;
 	HTTPRequestHandle id;
 	SteamAPICall_t call;
 	uint64 context;
@@ -73,25 +77,33 @@ struct VellumHttpReq {
 #ifdef _WIN32
 	HANDLE thread;
 	CRITICAL_SECTION lock;
-	int lock_ready;
+#else
+	pthread_t thread;
+	pthread_mutex_t lock;
 #endif
+	int lock_ready;
+	int thread_ready;
 };
 
 static VellumHttpReq g_http_reqs[VELLUM_HTTP_MAX];
 static HTTPRequestHandle g_http_next = 1;
 static SteamAPICall_t g_http_call_next = 1;
-#ifdef _WIN32
-static CRITICAL_SECTION g_http_cs;
-static int g_http_cs_ready;
-#endif
 
-static void Vellum_HttpLockInit()
+static void Vellum_HttpReqLock(VellumHttpReq *r)
 {
 #ifdef _WIN32
-	if (!g_http_cs_ready) {
-		InitializeCriticalSection(&g_http_cs);
-		g_http_cs_ready = 1;
-	}
+	EnterCriticalSection(&r->lock);
+#else
+	pthread_mutex_lock(&r->lock);
+#endif
+}
+
+static void Vellum_HttpReqUnlock(VellumHttpReq *r)
+{
+#ifdef _WIN32
+	LeaveCriticalSection(&r->lock);
+#else
+	pthread_mutex_unlock(&r->lock);
 #endif
 }
 
@@ -123,14 +135,17 @@ static VellumHttpReq *Vellum_HttpFindCall(SteamAPICall_t call)
 	return NULL;
 }
 
-#ifdef _WIN32
 static void Vellum_HttpBuildHeaders(VellumHttpReq *r, char *out, int outsz)
 {
 	int i;
 	int n = 0;
 	out[0] = '\0';
 	for (i = 0; i < r->nhdr && n < outsz - 4; i++) {
+#ifdef _WIN32
 		n += _snprintf(out + n, (size_t)(outsz - n), "%s: %s\r\n", r->hdrs[i].name, r->hdrs[i].value);
+#else
+		n += snprintf(out + n, (size_t)(outsz - n), "%s: %s\r\n", r->hdrs[i].name, r->hdrs[i].value);
+#endif
 		if (n < 0 || n >= outsz) {
 			out[outsz - 1] = '\0';
 			return;
@@ -138,6 +153,193 @@ static void Vellum_HttpBuildHeaders(VellumHttpReq *r, char *out, int outsz)
 	}
 }
 
+#ifndef _WIN32
+typedef void VellumCurl;
+typedef int VellumCurlCode;
+typedef long long VellumCurlOff;
+
+struct VellumCurlApi {
+	void *lib;
+	VellumCurlCode (*global_init)(long);
+	void (*global_cleanup)(void);
+	VellumCurl *(*easy_init)(void);
+	VellumCurlCode (*easy_setopt)(VellumCurl *, int, ...);
+	VellumCurlCode (*easy_perform)(VellumCurl *);
+	VellumCurlCode (*easy_getinfo)(VellumCurl *, int, ...);
+	void (*easy_cleanup)(VellumCurl *);
+	int ready;
+};
+
+struct VellumCurlBuf {
+	uint8 *data;
+	uint32 n;
+	uint32 cap;
+	int overflow;
+	volatile int *abort_flag;
+};
+
+enum {
+	Vellum_CURLOPT_URL = 10002,
+	Vellum_CURLOPT_WRITEFUNCTION = 20011,
+	Vellum_CURLOPT_WRITEDATA = 10001,
+	Vellum_CURLOPT_FOLLOWLOCATION = 52,
+	Vellum_CURLOPT_TIMEOUT = 13,
+	Vellum_CURLOPT_USERAGENT = 10018,
+	Vellum_CURLOPT_NOPROGRESS = 43,
+	Vellum_CURLOPT_XFERINFOFUNCTION = 20219,
+	Vellum_CURLOPT_XFERINFODATA = 10057,
+	Vellum_CURLOPT_NOBODY = 44,
+	Vellum_CURLOPT_ACCEPT_ENCODING = 10102,
+	Vellum_CURLINFO_RESPONSE_CODE = 0x200002,
+	Vellum_CURLE_OK = 0,
+	Vellum_CURL_GLOBAL_DEFAULT = 3
+};
+
+static VellumCurlApi g_curl;
+
+static int Vellum_CurlLoad()
+{
+	if (g_curl.ready) {
+		return 1;
+	}
+	g_curl.lib = dlopen("libcurl.so.4", RTLD_NOW | RTLD_LOCAL);
+	if (g_curl.lib == NULL) {
+		g_curl.lib = dlopen("libcurl.so", RTLD_NOW | RTLD_LOCAL);
+	}
+	if (g_curl.lib == NULL) {
+		Vellum_Log("HTTP curl dlopen fail: %s", dlerror());
+		return 0;
+	}
+	g_curl.global_init = (VellumCurlCode (*)(long))dlsym(g_curl.lib, "curl_global_init");
+	g_curl.global_cleanup = (void (*)(void))dlsym(g_curl.lib, "curl_global_cleanup");
+	g_curl.easy_init = (VellumCurl *(*)(void))dlsym(g_curl.lib, "curl_easy_init");
+	g_curl.easy_setopt = (VellumCurlCode (*)(VellumCurl *, int, ...))dlsym(g_curl.lib, "curl_easy_setopt");
+	g_curl.easy_perform = (VellumCurlCode (*)(VellumCurl *))dlsym(g_curl.lib, "curl_easy_perform");
+	g_curl.easy_getinfo = (VellumCurlCode (*)(VellumCurl *, int, ...))dlsym(g_curl.lib, "curl_easy_getinfo");
+	g_curl.easy_cleanup = (void (*)(VellumCurl *))dlsym(g_curl.lib, "curl_easy_cleanup");
+	if (!g_curl.global_init || !g_curl.easy_init || !g_curl.easy_setopt ||
+	    !g_curl.easy_perform || !g_curl.easy_getinfo || !g_curl.easy_cleanup) {
+		Vellum_Log("HTTP curl dlsym fail");
+		dlclose(g_curl.lib);
+		memset(&g_curl, 0, sizeof(g_curl));
+		return 0;
+	}
+	g_curl.global_init(Vellum_CURL_GLOBAL_DEFAULT);
+	g_curl.ready = 1;
+	Vellum_Log("HTTP curl ready");
+	return 1;
+}
+
+static size_t Vellum_CurlWrite(char *ptr, size_t size, size_t nmemb, void *userdata)
+{
+	VellumCurlBuf *b = (VellumCurlBuf *)userdata;
+	size_t got = size * nmemb;
+	uint8 *nb;
+	uint32 ncap;
+	if (b->abort_flag && *b->abort_flag) {
+		return 0;
+	}
+	if (b->n + (uint32)got > VELLUM_HTTP_BODY_MAX) {
+		b->overflow = 1;
+		return 0;
+	}
+	if (b->n + (uint32)got > b->cap) {
+		ncap = b->cap ? b->cap * 2 : 65536;
+		while (ncap < b->n + (uint32)got) {
+			ncap *= 2;
+		}
+		nb = (uint8 *)realloc(b->data, ncap);
+		if (nb == NULL) {
+			b->overflow = 1;
+			return 0;
+		}
+		b->data = nb;
+		b->cap = ncap;
+	}
+	memcpy(b->data + b->n, ptr, got);
+	b->n += (uint32)got;
+	return got;
+}
+
+static int Vellum_CurlXfer(void *clientp, VellumCurlOff, VellumCurlOff, VellumCurlOff, VellumCurlOff)
+{
+	volatile int *abort_flag = (volatile int *)clientp;
+	return (abort_flag && *abort_flag) ? 1 : 0;
+}
+
+int Vellum_NetHttpGet(const char *url, const char *ua, int timeout_sec, int head_only,
+                      uint8 **out_body, uint32 *out_n, uint32 *out_status, volatile int *abort_flag)
+{
+	VellumCurl *curl;
+	VellumCurlBuf buf;
+	long status = 0;
+	VellumCurlCode rc;
+	int ok = 0;
+
+	if (out_body) {
+		*out_body = NULL;
+	}
+	if (out_n) {
+		*out_n = 0;
+	}
+	if (out_status) {
+		*out_status = 0;
+	}
+	if (url == NULL || url[0] == '\0' || !Vellum_CurlLoad()) {
+		return 0;
+	}
+	if (abort_flag && *abort_flag) {
+		return 0;
+	}
+	memset(&buf, 0, sizeof(buf));
+	buf.abort_flag = abort_flag;
+	curl = g_curl.easy_init();
+	if (curl == NULL) {
+		return 0;
+	}
+	g_curl.easy_setopt(curl, Vellum_CURLOPT_URL, url);
+	g_curl.easy_setopt(curl, Vellum_CURLOPT_FOLLOWLOCATION, 1L);
+	g_curl.easy_setopt(curl, Vellum_CURLOPT_TIMEOUT, (long)(timeout_sec > 0 ? timeout_sec : 20));
+	g_curl.easy_setopt(curl, Vellum_CURLOPT_USERAGENT, ua && ua[0] ? ua : "VellumHTTP/1.0");
+	g_curl.easy_setopt(curl, Vellum_CURLOPT_ACCEPT_ENCODING, "");
+	g_curl.easy_setopt(curl, Vellum_CURLOPT_NOPROGRESS, 1L);
+	if (abort_flag) {
+		g_curl.easy_setopt(curl, Vellum_CURLOPT_NOPROGRESS, 0L);
+		g_curl.easy_setopt(curl, Vellum_CURLOPT_XFERINFOFUNCTION, Vellum_CurlXfer);
+		g_curl.easy_setopt(curl, Vellum_CURLOPT_XFERINFODATA, (void *)abort_flag);
+	}
+	if (head_only) {
+		g_curl.easy_setopt(curl, Vellum_CURLOPT_NOBODY, 1L);
+	} else {
+		g_curl.easy_setopt(curl, Vellum_CURLOPT_WRITEFUNCTION, Vellum_CurlWrite);
+		g_curl.easy_setopt(curl, Vellum_CURLOPT_WRITEDATA, &buf);
+	}
+	rc = g_curl.easy_perform(curl);
+	if (rc == Vellum_CURLE_OK && !buf.overflow && !(abort_flag && *abort_flag)) {
+		g_curl.easy_getinfo(curl, Vellum_CURLINFO_RESPONSE_CODE, &status);
+		ok = 1;
+	}
+	g_curl.easy_cleanup(curl);
+	if (!ok) {
+		free(buf.data);
+		return 0;
+	}
+	if (out_body) {
+		*out_body = buf.data;
+	} else {
+		free(buf.data);
+	}
+	if (out_n) {
+		*out_n = buf.n;
+	}
+	if (out_status) {
+		*out_status = (uint32)status;
+	}
+	return 1;
+}
+#endif
+
+#ifdef _WIN32
 static DWORD WINAPI Vellum_HttpWorker(LPVOID param)
 {
 	VellumHttpReq *r = (VellumHttpReq *)param;
@@ -243,6 +445,44 @@ done:
 	}
 	return 0;
 }
+#else
+static void *Vellum_HttpWorker(void *param)
+{
+	VellumHttpReq *r = (VellumHttpReq *)param;
+	uint8 *body = NULL;
+	uint32 n = 0;
+	uint32 status = 0;
+	int ok = 0;
+	char ua[160];
+	int timeout_sec;
+
+	strncpy(ua, r->ua[0] ? r->ua : "Valve/Steam HTTP Client 1.0", sizeof(ua) - 1);
+	ua[sizeof(ua) - 1] = '\0';
+	timeout_sec = (int)((r->timeout_ms ? r->timeout_ms : 30000) + 999) / 1000;
+	if (timeout_sec < 5) {
+		timeout_sec = 5;
+	}
+	ok = Vellum_NetHttpGet(r->url, ua, timeout_sec, r->method == k_EHTTPMethodHEAD,
+	                       r->method == k_EHTTPMethodHEAD ? NULL : &body, &n, &status, &r->abort);
+	if (r->abort) {
+		ok = 0;
+		status = 0;
+		free(body);
+		body = NULL;
+		n = 0;
+	}
+	Vellum_HttpReqLock(r);
+	r->ok = ok != 0 && status != 0;
+	r->status = status;
+	r->body = body;
+	r->body_size = n;
+	r->body_got = n;
+	r->progress = 100.0f;
+	r->timed_out = (!ok && !r->abort) ? 1 : 0;
+	r->done = 1;
+	Vellum_HttpReqUnlock(r);
+	return NULL;
+}
 #endif
 
 static HTTPRequestHandle Vellum_HttpCreate(int method, const char *url)
@@ -252,7 +492,6 @@ static HTTPRequestHandle Vellum_HttpCreate(int method, const char *url)
 	if (url == NULL || (strncmp(url, "http://", 7) != 0 && strncmp(url, "https://", 8) != 0)) {
 		return 0;
 	}
-	Vellum_HttpLockInit();
 	for (i = 0; i < VELLUM_HTTP_MAX; i++) {
 		if (!g_http_reqs[i].used) {
 			r = &g_http_reqs[i];
@@ -265,8 +504,12 @@ static HTTPRequestHandle Vellum_HttpCreate(int method, const char *url)
 	memset(r, 0, sizeof(*r));
 #ifdef _WIN32
 	InitializeCriticalSection(&r->lock);
-	r->lock_ready = 1;
+#else
+	if (pthread_mutex_init(&r->lock, NULL) != 0) {
+		return 0;
+	}
 #endif
+	r->lock_ready = 1;
 	r->used = 1;
 	r->id = g_http_next++;
 	if (g_http_next == 0) {
@@ -301,27 +544,39 @@ static bool Vellum_HttpSend(HTTPRequestHandle h, SteamAPICall_t *call, int /*str
 		return true;
 	}
 #else
-	r->ok = false;
-	r->done = 1;
+	if (pthread_create(&r->thread, NULL, Vellum_HttpWorker, r) != 0) {
+		r->ok = false;
+		r->done = 1;
+		Vellum_Log("HTTP Send id=%u call=%u thread fail", r->id, (unsigned)r->call);
+		return true;
+	}
 #endif
+	r->thread_ready = 1;
 	Vellum_Log("HTTP Send id=%u call=%u", r->id, (unsigned)r->call);
 	return true;
 }
 
 static void Vellum_HttpFree(VellumHttpReq *r)
 {
-#ifdef _WIN32
 	r->abort = 1;
-	if (r->thread) {
+	if (r->thread_ready) {
+#ifdef _WIN32
 		WaitForSingleObject(r->thread, 8000);
 		CloseHandle(r->thread);
 		r->thread = NULL;
+#else
+		pthread_join(r->thread, NULL);
+#endif
+		r->thread_ready = 0;
 	}
 	if (r->lock_ready) {
+#ifdef _WIN32
 		DeleteCriticalSection(&r->lock);
+#else
+		pthread_mutex_destroy(&r->lock);
+#endif
 		r->lock_ready = 0;
 	}
-#endif
 	free(r->body);
 	memset(r, 0, sizeof(*r));
 }
@@ -333,27 +588,20 @@ void Vellum_HttpThink()
 		VellumHttpReq *r = &g_http_reqs[i];
 		HTTPRequestCompleted_t done;
 		SteamAPICallCompleted_t call;
+		int ready;
 		if (!r->used || !r->sent || r->notified) {
 			continue;
 		}
-#ifdef _WIN32
 		if (r->lock_ready) {
-			EnterCriticalSection(&r->lock);
+			Vellum_HttpReqLock(r);
 		}
-#endif
-		if (!r->done) {
-#ifdef _WIN32
-			if (r->lock_ready) {
-				LeaveCriticalSection(&r->lock);
-			}
-#endif
+		ready = r->done;
+		if (r->lock_ready) {
+			Vellum_HttpReqUnlock(r);
+		}
+		if (!ready) {
 			continue;
 		}
-#ifdef _WIN32
-		if (r->lock_ready) {
-			LeaveCriticalSection(&r->lock);
-		}
-#endif
 		memset(&done, 0, sizeof(done));
 		done.m_hRequest = r->id;
 		done.m_ulContextValue = r->context;
@@ -439,7 +687,7 @@ public:
 		if (r == NULL) {
 			return false;
 		}
-		r->timeout_ms = sec ? sec * 1000 : 30000;
+		r->timeout_ms = sec ? sec * 1000u : 30000u;
 		return true;
 	}
 	virtual bool SetHTTPRequestHeaderValue(HTTPRequestHandle h, const char *name, const char *value)
@@ -448,8 +696,8 @@ public:
 		if (r == NULL || name == NULL || value == NULL || r->nhdr >= VELLUM_HTTP_HDR_MAX) {
 			return false;
 		}
-		strncpy(r->hdrs[r->nhdr].name, name, sizeof(r->hdrs[0].name) - 1);
-		strncpy(r->hdrs[r->nhdr].value, value, sizeof(r->hdrs[0].value) - 1);
+		strncpy(r->hdrs[r->nhdr].name, name, sizeof(r->hdrs[r->nhdr].name) - 1);
+		strncpy(r->hdrs[r->nhdr].value, value, sizeof(r->hdrs[r->nhdr].value) - 1);
 		r->nhdr++;
 		return true;
 	}
@@ -469,7 +717,7 @@ public:
 	virtual bool GetHTTPResponseBodySize(HTTPRequestHandle h, uint32 *size)
 	{
 		VellumHttpReq *r = Vellum_HttpFind(h);
-		if (r == NULL || !r->done || size == NULL) {
+		if (r == NULL || size == NULL || !r->done) {
 			return false;
 		}
 		*size = r->body_size;
@@ -478,29 +726,22 @@ public:
 	virtual bool GetHTTPResponseBodyData(HTTPRequestHandle h, uint8 *buf, uint32 size)
 	{
 		VellumHttpReq *r = Vellum_HttpFind(h);
-		if (r == NULL || !r->done || buf == NULL || size < r->body_size) {
+		if (r == NULL || buf == NULL || !r->done || r->body == NULL || size < r->body_size) {
 			return false;
 		}
-		if (r->body_size && r->body) {
-			memcpy(buf, r->body, r->body_size);
-		}
+		memcpy(buf, r->body, r->body_size);
 		return true;
 	}
 	virtual bool GetHTTPStreamingResponseBodyData(HTTPRequestHandle h, uint32 off, uint8 *buf, uint32 size)
 	{
 		VellumHttpReq *r = Vellum_HttpFind(h);
-		if (r == NULL || buf == NULL) {
-			return false;
-		}
-		if (off >= r->body_got) {
+		if (r == NULL || buf == NULL || r->body == NULL || off >= r->body_got) {
 			return false;
 		}
 		if (off + size > r->body_got) {
-			return false;
+			size = r->body_got - off;
 		}
-		if (r->body) {
-			memcpy(buf, r->body + off, size);
-		}
+		memcpy(buf, r->body + off, size);
 		return true;
 	}
 	virtual bool ReleaseHTTPRequest(HTTPRequestHandle h)
