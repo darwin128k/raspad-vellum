@@ -3,8 +3,11 @@
 #include "steam_http.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <math.h>
+
+#include <opus/opus.h>
 
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
@@ -12,7 +15,11 @@
 #endif
 #include <windows.h>
 #include <mmsystem.h>
-#include <opus.h>
+#else
+#include <alsa/asoundlib.h>
+#include <pthread.h>
+#include <time.h>
+#include <unistd.h>
 #endif
 
 enum {
@@ -24,8 +31,6 @@ enum {
 	kVoiceDataCorrupted = 5
 };
 
-#ifdef _WIN32
-
 #define GS_RATE 24000
 #define GS_FRAME 480
 #define OPUS_BITRATE 32000
@@ -36,22 +41,37 @@ enum {
 #define MAX_RX_SLOTS 16
 #define MAX_FRAMES_PER_PKT 6
 #define MIN_OPUS_SPEECH_BYTES 8
-#define VPC_SETSAMPLERATE 11
+#define VPC_SILENCE 0
+#define VPC_OPUS 4
 #define VPC_OPUS_PLC 6
+#define VPC_SETSAMPLERATE 11
 
 typedef struct RxSlot_s {
 	uint64 sid;
 	OpusDecoder *dec;
 	uint16 seq;
-	DWORD lastUsed;
+	unsigned rate;
+	unsigned lastUsed;
 } RxSlot;
 
+#ifdef _WIN32
 static CRITICAL_SECTION g_lock;
+#else
+static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
+#endif
 static int g_lock_ready;
 static int g_recording;
+
+#ifdef _WIN32
 static HWAVEIN g_hwi;
 static WAVEHDR g_hdrs[CAP_CHUNKS];
 static short g_chunks[CAP_CHUNKS][CAP_CHUNK];
+#else
+static snd_pcm_t *g_capture;
+static pthread_t g_cap_thread;
+static int g_cap_thread_ready;
+#endif
+
 static short g_ring[RING_MAX];
 static int g_ring_n;
 static short g_in[8192];
@@ -68,6 +88,47 @@ static uint16 g_seq;
 static uint64 g_sid;
 static RxSlot g_rx[MAX_RX_SLOTS];
 
+static unsigned Vellum_VoiceNow()
+{
+#ifdef _WIN32
+	return GetTickCount();
+#else
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (unsigned)(ts.tv_sec * 1000u + ts.tv_nsec / 1000000u);
+#endif
+}
+
+static void EnsureLock()
+{
+#ifdef _WIN32
+	if (!g_lock_ready) {
+		InitializeCriticalSection(&g_lock);
+		g_lock_ready = 1;
+	}
+#else
+	g_lock_ready = 1;
+#endif
+}
+
+static void VoiceLock()
+{
+#ifdef _WIN32
+	EnterCriticalSection(&g_lock);
+#else
+	pthread_mutex_lock(&g_lock);
+#endif
+}
+
+static void VoiceUnlock()
+{
+#ifdef _WIN32
+	LeaveCriticalSection(&g_lock);
+#else
+	pthread_mutex_unlock(&g_lock);
+#endif
+}
+
 static unsigned Crc32(const unsigned char *data, unsigned len)
 {
 	unsigned crc = 0xFFFFFFFFu;
@@ -83,14 +144,6 @@ static unsigned Crc32(const unsigned char *data, unsigned len)
 		}
 	}
 	return crc ^ 0xFFFFFFFFu;
-}
-
-static void EnsureLock()
-{
-	if (!g_lock_ready) {
-		InitializeCriticalSection(&g_lock);
-		g_lock_ready = 1;
-	}
 }
 
 static float FrameRms(const short *s, int n)
@@ -153,17 +206,21 @@ static int EnsureEncoder()
 	return 1;
 }
 
-static RxSlot *GetRxSlot(uint64 sid)
+static RxSlot *GetRxSlot(uint64 sid, unsigned rate)
 {
 	int i;
 	int freeIdx = -1;
 	int lruIdx = 0;
-	DWORD now = GetTickCount();
+	int hitIdx = -1;
+	unsigned now = Vellum_VoiceNow();
 	int err = 0;
+	if (rate < 8000 || rate > 48000) {
+		rate = GS_RATE;
+	}
 	for (i = 0; i < MAX_RX_SLOTS; i++) {
 		if (g_rx[i].dec != NULL && g_rx[i].sid == sid) {
-			g_rx[i].lastUsed = now;
-			return &g_rx[i];
+			hitIdx = i;
+			break;
 		}
 		if (g_rx[i].dec == NULL && freeIdx < 0) {
 			freeIdx = i;
@@ -172,18 +229,23 @@ static RxSlot *GetRxSlot(uint64 sid)
 			lruIdx = i;
 		}
 	}
-	i = (freeIdx >= 0) ? freeIdx : lruIdx;
+	if (hitIdx >= 0 && g_rx[hitIdx].rate == rate) {
+		g_rx[hitIdx].lastUsed = now;
+		return &g_rx[hitIdx];
+	}
+	i = (hitIdx >= 0) ? hitIdx : ((freeIdx >= 0) ? freeIdx : lruIdx);
 	if (g_rx[i].dec != NULL) {
 		opus_decoder_destroy(g_rx[i].dec);
 		g_rx[i].dec = NULL;
 	}
-	g_rx[i].dec = opus_decoder_create(GS_RATE, 1, &err);
+	g_rx[i].dec = opus_decoder_create((opus_int32)rate, 1, &err);
 	if (g_rx[i].dec == NULL || err != OPUS_OK) {
 		g_rx[i].dec = NULL;
 		return NULL;
 	}
 	g_rx[i].sid = sid;
 	g_rx[i].seq = 0;
+	g_rx[i].rate = rate;
 	g_rx[i].lastUsed = now;
 	return &g_rx[i];
 }
@@ -227,6 +289,7 @@ static int RingPull(short *dst, int maxn)
 	return n;
 }
 
+#ifdef _WIN32
 static void CALLBACK Vellum_WaveInProc(HWAVEIN hwi, UINT msg, DWORD_PTR instance, DWORD_PTR p1, DWORD_PTR p2)
 {
 	WAVEHDR *hdr;
@@ -237,11 +300,11 @@ static void CALLBACK Vellum_WaveInProc(HWAVEIN hwi, UINT msg, DWORD_PTR instance
 	}
 	hdr = (WAVEHDR *)p1;
 	EnsureLock();
-	EnterCriticalSection(&g_lock);
+	VoiceLock();
 	if (g_recording && hdr->dwBytesRecorded >= 2) {
 		RingPush((const short *)hdr->lpData, (int)(hdr->dwBytesRecorded / 2));
 	}
-	LeaveCriticalSection(&g_lock);
+	VoiceUnlock();
 	if (g_recording && g_hwi == hwi) {
 		waveInAddBuffer(hwi, hdr, sizeof(WAVEHDR));
 	}
@@ -296,6 +359,96 @@ static int OpenMic()
 	}
 	return 1;
 }
+#else
+static void *Vellum_CaptureThread(void *arg)
+{
+	short buf[CAP_CHUNK];
+	(void)arg;
+	while (1) {
+		snd_pcm_sframes_t got;
+		int recording;
+		VoiceLock();
+		recording = g_recording;
+		VoiceUnlock();
+		if (!recording || g_capture == NULL) {
+			break;
+		}
+		got = snd_pcm_readi(g_capture, buf, CAP_CHUNK);
+		if (got == -EPIPE) {
+			snd_pcm_prepare(g_capture);
+			continue;
+		}
+		if (got < 0) {
+			usleep(5000);
+			continue;
+		}
+		if (got > 0) {
+			VoiceLock();
+			if (g_recording) {
+				RingPush(buf, (int)got);
+			}
+			VoiceUnlock();
+		}
+	}
+	return NULL;
+}
+
+static void CloseMic()
+{
+	g_recording = 0;
+	if (g_cap_thread_ready) {
+		pthread_join(g_cap_thread, NULL);
+		g_cap_thread_ready = 0;
+	}
+	if (g_capture != NULL) {
+		snd_pcm_drop(g_capture);
+		snd_pcm_close(g_capture);
+		g_capture = NULL;
+	}
+}
+
+static int OpenMic()
+{
+	int err;
+	snd_pcm_hw_params_t *hw = NULL;
+	unsigned rate = CAP_RATE;
+	snd_pcm_uframes_t period = CAP_CHUNK;
+	if (g_capture != NULL) {
+		return 1;
+	}
+	err = snd_pcm_open(&g_capture, "default", SND_PCM_STREAM_CAPTURE, 0);
+	if (err < 0) {
+		Vellum_Log("Voice alsa open: %s", snd_strerror(err));
+		g_capture = NULL;
+		return 0;
+	}
+	snd_pcm_hw_params_malloc(&hw);
+	snd_pcm_hw_params_any(g_capture, hw);
+	snd_pcm_hw_params_set_access(g_capture, hw, SND_PCM_ACCESS_RW_INTERLEAVED);
+	snd_pcm_hw_params_set_format(g_capture, hw, SND_PCM_FORMAT_S16_LE);
+	snd_pcm_hw_params_set_channels(g_capture, hw, 1);
+	snd_pcm_hw_params_set_rate_near(g_capture, hw, &rate, 0);
+	snd_pcm_hw_params_set_period_size_near(g_capture, hw, &period, 0);
+	err = snd_pcm_hw_params(g_capture, hw);
+	snd_pcm_hw_params_free(hw);
+	if (err < 0) {
+		Vellum_Log("Voice alsa hw: %s", snd_strerror(err));
+		snd_pcm_close(g_capture);
+		g_capture = NULL;
+		return 0;
+	}
+	snd_pcm_prepare(g_capture);
+	if (pthread_create(&g_cap_thread, NULL, Vellum_CaptureThread, NULL) != 0) {
+		Vellum_Log("Voice capture thread fail");
+		snd_pcm_close(g_capture);
+		g_capture = NULL;
+		return 0;
+	}
+	g_cap_thread_ready = 1;
+	Vellum_Log("Voice alsa rate=%u period=%u", rate, (unsigned)period);
+	return 1;
+}
+#endif
 
 static void AppendCapture(const short *src, int n, unsigned rate)
 {
@@ -411,22 +564,11 @@ static void EncodePending()
 	g_pktLen = BuildPacket(payload, pay);
 }
 
-static int LooksLikeSteamVoice(const unsigned char *p, unsigned n)
+static int SteamVoiceCrcOk(const unsigned char *p, unsigned n)
 {
 	unsigned crc;
 	unsigned got;
-	unsigned pay;
-	if (p == NULL || n < 18) {
-		return 0;
-	}
-	if (p[8] != VPC_SETSAMPLERATE) {
-		return 0;
-	}
-	if (p[11] != VPC_OPUS_PLC && p[11] != 4) {
-		return 0;
-	}
-	pay = (unsigned)p[12] | ((unsigned)p[13] << 8);
-	if (14u + pay + 4u != n) {
+	if (p == NULL || n < 12) {
 		return 0;
 	}
 	crc = Crc32(p, n - 4);
@@ -434,52 +576,58 @@ static int LooksLikeSteamVoice(const unsigned char *p, unsigned n)
 	return crc == got;
 }
 
-static int DecodeSteamPayload(const unsigned char *comp, unsigned compBytes, short *pcm24, int maxSamples)
+static int DecodeOpusPayload(RxSlot *slot, const unsigned char *payload, unsigned payLen,
+                             short *pcm, int maxSamples)
 {
-	unsigned off;
-	unsigned payLen;
-	unsigned end;
+	unsigned off = 0;
 	int samples = 0;
-	uint64 sid;
-	RxSlot *slot;
-	if (!LooksLikeSteamVoice(comp, compBytes)) {
+	int frameSamples;
+	unsigned firstLen;
+	if (slot == NULL || slot->dec == NULL || payload == NULL || payLen == 0) {
 		return -1;
 	}
-	memcpy(&sid, comp, 8);
-	slot = GetRxSlot(sid);
-	if (slot == NULL || slot->dec == NULL) {
-		return -1;
+	frameSamples = (int)slot->rate / 50;
+	if (frameSamples < 160) {
+		frameSamples = GS_FRAME;
 	}
-	payLen = (unsigned)comp[12] | ((unsigned)comp[13] << 8);
-	off = 14;
-	end = 14 + payLen;
-	while (off + 4 <= end && samples + GS_FRAME <= maxSamples) {
-		unsigned frameBytes = (unsigned)comp[off] | ((unsigned)comp[off + 1] << 8);
-		unsigned seq = (unsigned)comp[off + 2] | ((unsigned)comp[off + 3] << 8);
+	firstLen = (unsigned)payload[0] | ((unsigned)payload[1] << 8);
+	if (payLen < 4 || firstLen == 0 || firstLen == 0xFFFFu || firstLen + 4u > payLen || firstLen > 400u) {
+		int maxFrames = frameSamples * MAX_FRAMES_PER_PKT;
+		int got = opus_decode(slot->dec, payload, (int)payLen, pcm,
+		                      maxFrames < maxSamples ? maxFrames : maxSamples, 0);
+		return got > 0 ? got : -1;
+	}
+	while (off + 4 <= payLen && samples + frameSamples <= maxSamples) {
+		unsigned frameBytes = (unsigned)payload[off] | ((unsigned)payload[off + 1] << 8);
+		unsigned seq = (unsigned)payload[off + 2] | ((unsigned)payload[off + 3] << 8);
 		int got;
 		off += 4;
 		if (frameBytes == 0xFFFFu) {
 			opus_decoder_ctl(slot->dec, OPUS_RESET_STATE);
 			slot->seq = 0;
+			continue;
+		}
+		if (frameBytes == 0 || off + frameBytes > payLen) {
 			break;
 		}
-		if (frameBytes == 0 || off + frameBytes > end) {
-			break;
-		}
-		if (seq != slot->seq && slot->seq != 0) {
+		if (seq < slot->seq && slot->seq != 0) {
+			opus_decoder_ctl(slot->dec, OPUS_RESET_STATE);
+			slot->seq = 0;
+		} else if (slot->seq != 0 && seq > slot->seq) {
 			int loss = (int)(seq - slot->seq);
-			if (loss > 0 && loss < 10) {
-				int i;
-				for (i = 0; i < loss && samples + GS_FRAME <= maxSamples; i++) {
-					got = opus_decode(slot->dec, NULL, 0, pcm24 + samples, GS_FRAME, 0);
-					if (got > 0) {
-						samples += got;
-					}
+			int i;
+			if (loss > 64) {
+				loss = 64;
+			}
+			for (i = 0; i < loss && samples + frameSamples <= maxSamples; i++) {
+				got = opus_decode(slot->dec, NULL, 0, pcm + samples, frameSamples, 0);
+				if (got > 0) {
+					samples += got;
 				}
 			}
 		}
 		slot->seq = (uint16)(seq + 1);
-		got = opus_decode(slot->dec, (const unsigned char *)comp + off, (int)frameBytes, pcm24 + samples, GS_FRAME, 0);
+		got = opus_decode(slot->dec, payload + off, (int)frameBytes, pcm + samples, frameSamples, 0);
 		off += frameBytes;
 		if (got > 0) {
 			samples += got;
@@ -488,11 +636,95 @@ static int DecodeSteamPayload(const unsigned char *comp, unsigned compBytes, sho
 	return samples;
 }
 
+static int DecodeSteamPayload(const unsigned char *comp, unsigned compBytes, short *pcmOut, int maxSamples,
+                              unsigned *outRate)
+{
+	unsigned off;
+	unsigned end;
+	int samples = 0;
+	uint64 sid;
+	unsigned rate = GS_RATE;
+	RxSlot *slot = NULL;
+	static int s_fail_logs;
+
+	if (outRate) {
+		*outRate = GS_RATE;
+	}
+	if (!SteamVoiceCrcOk(comp, compBytes)) {
+		if (s_fail_logs < 8) {
+			Vellum_Log("Voice decompress CRC fail n=%u", compBytes);
+			s_fail_logs++;
+		}
+		return -1;
+	}
+	memcpy(&sid, comp, 8);
+	off = 8;
+	end = compBytes - 4;
+	while (off + 3 <= end && samples < maxSamples) {
+		unsigned char type = comp[off++];
+		unsigned val = (unsigned)comp[off] | ((unsigned)comp[off + 1] << 8);
+		off += 2;
+		if (type == VPC_SETSAMPLERATE) {
+			if (val >= 8000 && val <= 48000) {
+				rate = val;
+			}
+			continue;
+		}
+		if (type == VPC_SILENCE) {
+			int sil = (int)val;
+			if (sil < 0) {
+				sil = 0;
+			}
+			if (sil > maxSamples - samples) {
+				sil = maxSamples - samples;
+			}
+			if (sil > 0) {
+				memset(pcmOut + samples, 0, (size_t)sil * sizeof(short));
+				samples += sil;
+			}
+			continue;
+		}
+		if (type == VPC_OPUS_PLC || type == VPC_OPUS) {
+			int got;
+			if (off + val > end) {
+				if (s_fail_logs < 8) {
+					Vellum_Log("Voice decompress truncated type=%u len=%u", type, val);
+					s_fail_logs++;
+				}
+				break;
+			}
+			if (slot == NULL || slot->rate != rate) {
+				slot = GetRxSlot(sid, rate);
+				if (slot == NULL) {
+					return samples > 0 ? samples : -1;
+				}
+			}
+			got = DecodeOpusPayload(slot, comp + off, val, pcmOut + samples, maxSamples - samples);
+			off += val;
+			if (got > 0) {
+				samples += got;
+			} else if (got < 0 && samples == 0) {
+				return -1;
+			}
+			continue;
+		}
+		if (s_fail_logs < 8) {
+			Vellum_Log("Voice decompress unknown type=%u val=%u off=%u n=%u", type, val, off, compBytes);
+			s_fail_logs++;
+		}
+		break;
+	}
+	if (outRate) {
+		*outRate = rate;
+	}
+	return samples;
+}
+
 void Vellum_VoiceStart()
 {
 	int need_mic;
 	EnsureLock();
-	EnterCriticalSection(&g_lock);
+	VoiceLock();
 	g_sid = Vellum_GetIdentity().steam_id.ConvertToUint64();
 	g_recording = 1;
 	g_ring_n = 0;
@@ -506,12 +738,16 @@ void Vellum_VoiceStart()
 		opus_encoder_ctl(g_enc, OPUS_RESET_STATE);
 	}
 	EnsureEncoder();
+#ifdef _WIN32
 	need_mic = (g_hwi == NULL);
-	LeaveCriticalSection(&g_lock);
+#else
+	need_mic = (g_capture == NULL);
+#endif
+	VoiceUnlock();
 	if (need_mic && !OpenMic()) {
-		EnterCriticalSection(&g_lock);
+		VoiceLock();
 		g_recording = 0;
-		LeaveCriticalSection(&g_lock);
+		VoiceUnlock();
 		return;
 	}
 	Vellum_Log("Voice start sid=%llu", (unsigned long long)g_sid);
@@ -520,7 +756,7 @@ void Vellum_VoiceStart()
 void Vellum_VoiceStop()
 {
 	EnsureLock();
-	EnterCriticalSection(&g_lock);
+	VoiceLock();
 	g_recording = 0;
 	g_pktLen = 0;
 	g_ring_n = 0;
@@ -529,7 +765,7 @@ void Vellum_VoiceStop()
 	if (g_enc != NULL) {
 		opus_encoder_ctl(g_enc, OPUS_RESET_STATE);
 	}
-	LeaveCriticalSection(&g_lock);
+	VoiceUnlock();
 	CloseMic();
 	Vellum_Log("Voice stop");
 }
@@ -539,9 +775,9 @@ int Vellum_VoiceAvailable(uint32 *pcbCompressed, uint32 *pcbUncompressed, uint32
 	uint32 comp = 0;
 	uint32 uncomp = 0;
 	EnsureLock();
-	EnterCriticalSection(&g_lock);
+	VoiceLock();
 	if (!g_recording) {
-		LeaveCriticalSection(&g_lock);
+		VoiceUnlock();
 		if (pcbCompressed) *pcbCompressed = 0;
 		if (pcbUncompressed) *pcbUncompressed = 0;
 		return kVoiceNotRecording;
@@ -555,7 +791,7 @@ int Vellum_VoiceAvailable(uint32 *pcbCompressed, uint32 *pcbUncompressed, uint32
 			uncomp = (uint32)(g_last24n * (int)sizeof(short));
 		}
 	}
-	LeaveCriticalSection(&g_lock);
+	VoiceUnlock();
 	if (pcbCompressed) *pcbCompressed = comp;
 	if (pcbUncompressed) *pcbUncompressed = uncomp;
 	return comp ? kVoiceOk : kVoiceNoData;
@@ -568,19 +804,19 @@ int Vellum_VoiceGet(bool wantCompressed, void *dst, uint32 dstBytes, uint32 *wro
 	if (wrote) *wrote = 0;
 	if (uwrote) *uwrote = 0;
 	EnsureLock();
-	EnterCriticalSection(&g_lock);
+	VoiceLock();
 	if (!g_recording) {
-		LeaveCriticalSection(&g_lock);
+		VoiceUnlock();
 		return kVoiceNotRecording;
 	}
 	EncodePending();
 	if (wantCompressed) {
 		if (g_pktLen == 0) {
-			LeaveCriticalSection(&g_lock);
+			VoiceUnlock();
 			return kVoiceNoData;
 		}
 		if (dst == NULL || dstBytes < g_pktLen) {
-			LeaveCriticalSection(&g_lock);
+			VoiceUnlock();
 			return kVoiceBufferTooSmall;
 		}
 		memcpy(dst, g_pkt, g_pktLen);
@@ -596,34 +832,44 @@ int Vellum_VoiceGet(bool wantCompressed, void *dst, uint32 dstBytes, uint32 *wro
 			rc = kVoiceOk;
 		}
 	}
-	LeaveCriticalSection(&g_lock);
+	VoiceUnlock();
 	return rc;
 }
 
 int Vellum_VoiceDecompress(const void *comp, uint32 compBytes, void *dst, uint32 dstBytes,
                            uint32 *wrote, uint32 wantRate)
 {
-	short pcm24[8192];
-	int n24;
+	short pcm[8192];
+	int nPcm;
 	int nOut;
+	int maxOut;
+	unsigned srcRate = GS_RATE;
 	if (wrote) *wrote = 0;
 	if (comp == NULL || dst == NULL || dstBytes < 2) {
 		return kVoiceDataCorrupted;
 	}
 	EnsureLock();
-	EnterCriticalSection(&g_lock);
-	n24 = DecodeSteamPayload((const unsigned char *)comp, compBytes, pcm24, 8192);
-	LeaveCriticalSection(&g_lock);
-	if (n24 < 0) {
+	VoiceLock();
+	nPcm = DecodeSteamPayload((const unsigned char *)comp, compBytes, pcm, 8192, &srcRate);
+	VoiceUnlock();
+	if (nPcm < 0) {
 		return kVoiceDataCorrupted;
 	}
-	if (n24 == 0) {
+	if (nPcm == 0) {
 		return kVoiceOk;
 	}
 	if (wantRate == 0) {
 		wantRate = 11025;
 	}
-	nOut = Resample(pcm24, n24, GS_RATE, (short *)dst, (int)(dstBytes / 2), wantRate);
+	maxOut = (int)(dstBytes / 2);
+	{
+		int need = (int)(((long long)nPcm * (long long)wantRate + (long long)srcRate - 1) / (long long)srcRate);
+		if (need > maxOut) {
+			if (wrote) *wrote = (uint32)need * 2u;
+			return kVoiceBufferTooSmall;
+		}
+	}
+	nOut = Resample(pcm, nPcm, srcRate, (short *)dst, maxOut, wantRate);
 	if (wrote) *wrote = (uint32)nOut * 2u;
 	return kVoiceOk;
 }
@@ -632,35 +878,3 @@ uint32 Vellum_VoiceOptimalRate()
 {
 	return 11025;
 }
-
-#else
-
-void Vellum_VoiceStart() {}
-void Vellum_VoiceStop() {}
-
-int Vellum_VoiceAvailable(uint32 *pcbCompressed, uint32 *pcbUncompressed, uint32)
-{
-	if (pcbCompressed) *pcbCompressed = 0;
-	if (pcbUncompressed) *pcbUncompressed = 0;
-	return kVoiceNotRecording;
-}
-
-int Vellum_VoiceGet(bool, void *, uint32, uint32 *wrote, bool, void *, uint32, uint32 *uwrote, uint32)
-{
-	if (wrote) *wrote = 0;
-	if (uwrote) *uwrote = 0;
-	return kVoiceNotRecording;
-}
-
-int Vellum_VoiceDecompress(const void *, uint32, void *, uint32, uint32 *wrote, uint32)
-{
-	if (wrote) *wrote = 0;
-	return kVoiceNotInitialized;
-}
-
-uint32 Vellum_VoiceOptimalRate()
-{
-	return 11025;
-}
-
-#endif
