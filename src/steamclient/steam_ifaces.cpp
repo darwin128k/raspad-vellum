@@ -98,6 +98,7 @@ static void Vellum_QueueCallback(HSteamUser user, int id, const void *data, int 
 static int Vellum_FillAuthTicket(void *pTicket, int cbMaxTicket, uint32 *pcbTicket);
 static void *Vellum_PickUser(const char *ver);
 static void *Vellum_PickFriends(const char *ver);
+static void Vellum_FlushListCallbacks();
 
 class SteamUser {
 public:
@@ -392,7 +393,7 @@ public:
 		if (pbFailed) *pbFailed = true;
 		return false;
 	}
-	virtual void RunFrame() {}
+	virtual void RunFrame() { Vellum_FlushListCallbacks(); }
 	virtual uint32 GetIPCCallCount() { return 0; }
 	virtual void SetWarningMessageHook(SteamAPIWarningMessageHook_t) {}
 	virtual bool IsOverlayEnabled() { return false; }
@@ -775,7 +776,7 @@ public:
 	virtual bool GetCertificateRequest(int *, void *, void *) { return false; }
 	virtual bool SetCertificate(const void *, int, void *) { return false; }
 	virtual void ResetIdentity(const void *) {}
-	virtual void RunCallbacks() {}
+	virtual void RunCallbacks() { Vellum_FlushListCallbacks(); }
 	virtual bool BeginAsyncRequestFakeIP(int) { return false; }
 	virtual void GetFakeIP(int, void *) {}
 	virtual uint32 CreateListenSocketP2PFakeIP(int, int, const void *) { return 0; }
@@ -1087,6 +1088,8 @@ struct VellumGameServerItem {
 struct VellumListReq {
 	int used;
 	int count;
+	int notified;
+	void *cb;
 	VellumGameServerItem items[VELLUM_FAV_MAX];
 };
 
@@ -1445,6 +1448,8 @@ static void Vellum_FillItem(VellumGameServerItem *it, const VellumFav *e)
 	it->hadResponse = true;
 	it->appId = e->app;
 	it->lastPlayed = e->played;
+	it->maxPlayers = 32;
+	it->ping = 0;
 	strncpy(it->gameDir, "cstrike", sizeof(it->gameDir) - 1);
 	b = (unsigned char *)&e->ip;
 #ifdef _WIN32
@@ -1462,7 +1467,6 @@ static HServerListRequest Vellum_ListRequest(AppId_t app, uint32 flagMask, void 
 	int r;
 	int i;
 	VellumListReq *req = NULL;
-	SteamServerListResponse *cb = (SteamServerListResponse *)response;
 	Vellum_FavLoad();
 	for (r = 0; r < VELLUM_REQ_MAX; r++) {
 		if (!g_reqs[r].used) {
@@ -1475,6 +1479,7 @@ static HServerListRequest Vellum_ListRequest(AppId_t app, uint32 flagMask, void 
 	}
 	memset(req, 0, sizeof(*req));
 	req->used = 1;
+	req->cb = response;
 	for (i = 0; i < g_fav_n && req->count < VELLUM_FAV_MAX; i++) {
 		if (app != 0 && g_favs[i].app != 0 && g_favs[i].app != app) {
 			continue;
@@ -1485,8 +1490,7 @@ static HServerListRequest Vellum_ListRequest(AppId_t app, uint32 flagMask, void 
 		Vellum_FillItem(&req->items[req->count], &g_favs[i]);
 		req->count++;
 	}
-	(void)cb;
-	Vellum_Log("ListRequest count=%d mask=%u", req->count, flagMask);
+	Vellum_Log("ListRequest count=%d mask=%u cb=%p", req->count, flagMask, response);
 	return (HServerListRequest)req;
 }
 
@@ -1499,6 +1503,8 @@ static void Vellum_ListRelease(HServerListRequest h)
 	}
 	for (r = 0; r < VELLUM_REQ_MAX; r++) {
 		if (&g_reqs[r] == req) {
+			req->cb = NULL;
+			req->notified = 1;
 			req->used = 0;
 			req->count = 0;
 			return;
@@ -1519,6 +1525,26 @@ static int Vellum_ListCount(HServerListRequest h)
 {
 	VellumListReq *req = (VellumListReq *)h;
 	return req != NULL ? req->count : 0;
+}
+
+static void Vellum_FlushListCallbacks()
+{
+	int r;
+	int i;
+	for (r = 0; r < VELLUM_REQ_MAX; r++) {
+		VellumListReq *req = &g_reqs[r];
+		SteamServerListResponse *cb;
+		if (!req->used || req->notified || req->cb == NULL) {
+			continue;
+		}
+		cb = (SteamServerListResponse *)req->cb;
+		req->notified = 1;
+		for (i = 0; i < req->count; i++) {
+			cb->ServerResponded((HServerListRequest)req, i);
+		}
+		cb->RefreshComplete((HServerListRequest)req, req->count ? 0 : 2);
+		Vellum_Log("ListNotify count=%d", req->count);
+	}
 }
 
 static CSteamID Vellum_GameServerSteamId()
@@ -1686,7 +1712,7 @@ public:
 	virtual void *GetISteamNetworking(HSteamUser, HSteamPipe, const char *) { return &g_net; }
 	virtual void *GetISteamRemoteStorage(HSteamUser, HSteamPipe, const char *) { return &g_remote; }
 	virtual void *GetISteamScreenshots(HSteamUser, HSteamPipe, const char *) { return &g_shots; }
-	virtual void RunFrame() {}
+	virtual void RunFrame() { Vellum_FlushListCallbacks(); }
 	virtual uint32 GetIPCCallCount() { return 0; }
 	virtual void SetWarningMessageHook(SteamAPIWarningMessageHook_t) {}
 	virtual bool BShutdownIfAllPipesClosed() { return true; }
@@ -1740,7 +1766,7 @@ public:
 	virtual void *GetISteamRemoteStorage(HSteamUser, HSteamPipe, const char *) { return &g_remote; }
 	virtual void *GetISteamScreenshots(HSteamUser, HSteamPipe, const char *) { return &g_shots; }
 	virtual void *GetISteamGameSearch(HSteamUser, HSteamPipe, const char *) { return NULL; }
-	virtual void RunFrame() {}
+	virtual void RunFrame() { Vellum_FlushListCallbacks(); }
 	virtual uint32 GetIPCCallCount() { return 0; }
 	virtual void SetWarningMessageHook(SteamAPIWarningMessageHook_t) {}
 	virtual bool BShutdownIfAllPipesClosed() { return true; }
@@ -1865,6 +1891,7 @@ STEAM_EXPORT void *STEAM_CALL SteamInternal_CreateInterface(const char *pName)
 
 STEAM_EXPORT bool STEAM_CALL Steam_BGetCallback(HSteamPipe, CallbackMsg_t *pCallback)
 {
+	Vellum_FlushListCallbacks();
 	if (pCallback == NULL || g_cbq_count <= 0) {
 		return false;
 	}
