@@ -12,6 +12,7 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
+#include <winnls.h>
 #include <winhttp.h>
 #else
 #include <arpa/inet.h>
@@ -633,6 +634,7 @@ struct VellumHttpList {
 	uint32 *ips;
 	uint16 *ports;
 	char url[512];
+	char country[8];
 	VellumMasterCb cb;
 	void *user;
 #ifdef _WIN32
@@ -1293,6 +1295,145 @@ static int Vellum_JsonStatusOffline(const char *json, const char *ipkey)
 	return Vellum_StrNicmp(s, "false", 5) == 0;
 }
 
+static int Vellum_JsonCountryMismatch(const char *json, const char *ipkey, const char *want)
+{
+	const char *obj = ipkey;
+	const char *end;
+	const char *s;
+	char got[8];
+	int n = 0;
+	if (want == NULL || want[0] == '\0' || json == NULL || ipkey == NULL) {
+		return 0;
+	}
+	while (obj > json && *obj != '{') {
+		obj--;
+	}
+	end = strchr(obj, '}');
+	s = strstr(obj, "\"country\":\"");
+	if (s == NULL || (end != NULL && s > end)) {
+		return 0;
+	}
+	s += 11;
+	while (*s && *s != '"' && n < (int)sizeof(got) - 1) {
+		got[n++] = *s++;
+	}
+	got[n] = '\0';
+	if (n != 2) {
+		return 0;
+	}
+	return Vellum_StrNicmp(got, want, 2) != 0;
+}
+
+static void Vellum_StrRemove(char *s, const char *tok)
+{
+	char *p;
+	size_t n;
+	if (s == NULL || tok == NULL || tok[0] == '\0') {
+		return;
+	}
+	n = strlen(tok);
+	while ((p = strstr(s, tok)) != NULL) {
+		memmove(p, p + n, strlen(p + n) + 1);
+	}
+}
+
+static void Vellum_StoreCountry(char *out, int outn, const char *cc)
+{
+	char a;
+	char b;
+	if (out == NULL || outn < 3 || cc == NULL) {
+		return;
+	}
+	a = cc[0];
+	b = cc[1];
+	if (a >= 'a' && a <= 'z') {
+		a = (char)(a - 32);
+	}
+	if (b >= 'a' && b <= 'z') {
+		b = (char)(b - 32);
+	}
+	if (a < 'A' || a > 'Z' || b < 'A' || b > 'Z') {
+		return;
+	}
+	out[0] = a;
+	out[1] = b;
+	out[2] = '\0';
+}
+
+static int Vellum_HttpListFetch(VellumHttpList *h, const char *url, char **out, int *outn);
+
+static void Vellum_CountryFromOs(char *out, int outn)
+{
+#ifdef _WIN32
+	GEOID id;
+	wchar_t w[8];
+	char cc[8];
+	id = GetUserGeoID(GEOCLASS_NATION);
+	if (id == GEOID_NOT_AVAILABLE) {
+		return;
+	}
+	if (GetGeoInfoW(id, GEO_ISO2, w, (int)(sizeof(w) / sizeof(w[0])), 0) <= 0) {
+		return;
+	}
+	if (WideCharToMultiByte(CP_ACP, 0, w, -1, cc, (int)sizeof(cc), NULL, NULL) <= 0) {
+		return;
+	}
+	Vellum_StoreCountry(out, outn, cc);
+#else
+	const char *lang = getenv("LC_ALL");
+	if (lang == NULL || lang[0] == '\0') {
+		lang = getenv("LANG");
+	}
+	if (lang != NULL && lang[0] != '\0' && lang[1] != '\0' && lang[2] == '_') {
+		char cc[4];
+		cc[0] = lang[0];
+		cc[1] = lang[1];
+		cc[2] = '\0';
+		Vellum_StoreCountry(out, outn, cc);
+	}
+#endif
+}
+
+static void Vellum_CountryFromBody(const char *json, char *out, int outn)
+{
+	const char *s;
+	char cc[8];
+	int n = 0;
+	if (json == NULL) {
+		return;
+	}
+	s = strstr(json, "\"countryCode\":\"");
+	if (s != NULL) {
+		s += 15;
+	} else {
+		return;
+	}
+	while (*s && *s != '"' && n < (int)sizeof(cc) - 1) {
+		cc[n++] = *s++;
+	}
+	cc[n] = '\0';
+	Vellum_StoreCountry(out, outn, cc);
+}
+
+static void Vellum_DetectCountry(VellumHttpList *h)
+{
+	char *body = NULL;
+	int n = 0;
+	if (h == NULL) {
+		return;
+	}
+	h->country[0] = '\0';
+	if (Vellum_HttpListFetch(h, "http://ip-api.com/json?fields=countryCode", &body, &n) && body != NULL) {
+		Vellum_CountryFromBody(body, h->country, (int)sizeof(h->country));
+		free(body);
+	}
+	Vellum_HttpListAbortNet(h);
+	if (h->country[0] == '\0') {
+		Vellum_CountryFromOs(h->country, (int)sizeof(h->country));
+	}
+	Vellum_Log("HttpList country=%s", h->country[0] ? h->country : "(none)");
+}
+
 static int Vellum_HttpListParse(const char *json, VellumHttpList *h, int *offline)
 {
 	const char *p = json;
@@ -1313,6 +1454,10 @@ static int Vellum_HttpListParse(const char *json, VellumHttpList *h, int *offlin
 			if (offline) {
 				(*offline)++;
 			}
+			p += 6;
+			continue;
+		}
+		if (Vellum_JsonCountryMismatch(json, p, h->country)) {
 			p += 6;
 			continue;
 		}
@@ -1362,22 +1507,43 @@ static int Vellum_HttpListPageSize(const char *url)
 	return n;
 }
 
-static void Vellum_HttpListMakeUrl(char *out, int outn, const char *tmpl, int offset)
+static void Vellum_HttpListMakeUrl(char *out, int outn, const char *tmpl, int offset, const char *country)
 {
+	char tmp[768];
 	const char *ph;
 	if (tmpl == NULL || out == NULL || outn <= 0) {
 		return;
 	}
-	ph = strstr(tmpl, "{offset}");
+	strncpy(tmp, tmpl, sizeof(tmp) - 1);
+	tmp[sizeof(tmp) - 1] = '\0';
+	if (country == NULL || country[0] == '\0') {
+		Vellum_StrRemove(tmp, "&country={country}");
+		Vellum_StrRemove(tmp, "country={country}&");
+		Vellum_StrRemove(tmp, "country={country}");
+	} else {
+		ph = strstr(tmp, "{country}");
+		if (ph != NULL) {
+			char filled[768];
+#ifdef _WIN32
+			_snprintf(filled, sizeof(filled), "%.*s%s%s", (int)(ph - tmp), tmp, country, ph + 9);
+#else
+			snprintf(filled, sizeof(filled), "%.*s%s%s", (int)(ph - tmp), tmp, country, ph + 9);
+#endif
+			filled[sizeof(filled) - 1] = '\0';
+			strncpy(tmp, filled, sizeof(tmp) - 1);
+			tmp[sizeof(tmp) - 1] = '\0';
+		}
+	}
+	ph = strstr(tmp, "{offset}");
 	if (ph == NULL) {
-		strncpy(out, tmpl, (size_t)outn - 1);
+		strncpy(out, tmp, (size_t)outn - 1);
 		out[outn - 1] = '\0';
 		return;
 	}
 #ifdef _WIN32
-	_snprintf(out, (size_t)outn, "%.*s%d%s", (int)(ph - tmpl), tmpl, offset, ph + 8);
+	_snprintf(out, (size_t)outn, "%.*s%d%s", (int)(ph - tmp), tmp, offset, ph + 8);
 #else
-	snprintf(out, (size_t)outn, "%.*s%d%s", (int)(ph - tmpl), tmpl, offset, ph + 8);
+	snprintf(out, (size_t)outn, "%.*s%d%s", (int)(ph - tmp), tmp, offset, ph + 8);
 #endif
 	out[outn - 1] = '\0';
 }
@@ -1394,6 +1560,9 @@ static void *Vellum_HttpListWorker(void *param)
 	int step = Vellum_HttpListPageSize(h->url);
 	int stride = step > 0 ? step : 100;
 	int paged = strstr(h->url, "{offset}") != NULL;
+	if (strstr(h->url, "{country}") != NULL) {
+		Vellum_DetectCountry(h);
+	}
 	for (offset = 0; offset < 100000 && !h->abort; offset += stride) {
 		char url[768];
 		char *body = NULL;
@@ -1403,7 +1572,7 @@ static void *Vellum_HttpListWorker(void *param)
 		int n_ip;
 		int n_conn;
 		int page_n;
-		Vellum_HttpListMakeUrl(url, (int)sizeof(url), h->url, offset);
+		Vellum_HttpListMakeUrl(url, (int)sizeof(url), h->url, offset, h->country);
 		if (!Vellum_HttpListFetch(h, url, &body, &n) || body == NULL) {
 			Vellum_HttpListAbortNet(h);
 			if (h->abort || !Vellum_HttpListFetch(h, url, &body, &n) || body == NULL) {

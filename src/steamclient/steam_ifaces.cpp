@@ -1185,7 +1185,7 @@ public:
 #define VELLUM_MASTER_CFG_MAX 8
 /* Default catalog URL is GameMonitoring's dialect (status=1). Other VDF entries keep their own query string. */
 #define VELLUM_MASTER_DEFAULT_URL \
-	"https://api.gamemonitoring.net/servers?game=10&status=1&limit=500&offset={offset}"
+	"https://api.gamemonitoring.net/servers?game=10&status=1&country={country}&limit=500&offset={offset}"
 
 static VellumFav g_favs[VELLUM_FAV_MAX];
 static int g_fav_n;
