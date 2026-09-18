@@ -7,8 +7,7 @@
 /* Vellum ticket v1 — GoldSrc connect blob emitted by this steamclient and
  * parsed by qproto as CA_VELLUM. Distinct size/magic from every RevEmu family
  * (10 / 152 / 178 / 194 / 0x300) so the server can later disable those and
- * keep only this client. Optional VELLUM_AUTH_REVEMU2013 emits the 194-byte
- * RevEmu 2013 blob instead (see revemu2013.cpp).
+ * keep only this client.
  *
  * Keep this header in sync with qproto/include/qproto/vellum_ticket.h. */
 

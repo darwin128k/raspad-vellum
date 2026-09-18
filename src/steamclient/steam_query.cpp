@@ -724,7 +724,7 @@ static int Vellum_UdpMasterStart(const char *host, uint16 port, const char *filt
 	}
 	m->used = 1;
 	m->master_ip = ip;
-	m->master_port = port ? port : 27011;
+	m->master_port = port ? port : 27010;
 	m->cb = cb;
 	m->user = user;
 	strncpy(m->filter, filter ? filter : "", sizeof(m->filter) - 1);
@@ -1753,20 +1753,20 @@ static int Vellum_SplitHostPort(const char *addr, char *host, size_t hostn, uint
 		host[n] = '\0';
 		*port = (uint16)strtoul(colon + 1, NULL, 10);
 		if (*port == 0) {
-			*port = 27011;
+			*port = 27010;
 		}
 		return host[0] != '\0';
 	}
 	strncpy(host, addr, hostn - 1);
 	host[hostn - 1] = '\0';
-	*port = 27011;
+	*port = 27010;
 	return host[0] != '\0';
 }
 
 int Vellum_MasterAdd(const char *address, const char *filter, VellumMasterCb cb, void *user)
 {
 	char host[256];
-	uint16 port = 27011;
+	uint16 port = 27010;
 	Vellum_QueryInit();
 	if (cb == NULL || address == NULL || address[0] == '\0') {
 		return 0;

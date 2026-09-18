@@ -16,9 +16,9 @@ The engine, filesystem, and `hw` live in [raspad-hl](https://github.com/darwin12
 ## What steamclient implements
 
 - **SteamClient012 / 017 / 020** — enough of `CreateInterface` for GoldSrc 8684 and Steam Half-Life (Oct 2024 / 10210+).
-- **Auth** — by default a 64-byte Vellum ticket (`VLLM`, `CA_VELLUM`). Optional `-DVELLUM_AUTH_REVEMU2013=ON` emits a RevEmu 2013 blob instead (`CA_REVEMU2013` on Reunion). One or the other, not both.
+- **Auth** — 64-byte Vellum ticket (`VLLM`, `CA_VELLUM`). No RevEmu dialect.
 - **Identity** — persona is the OS user name. The ticket ident is hostname plus a machine serial (Windows: `COMPUTERNAME` and the C: volume serial; Linux: `gethostname` and `/etc/machine-id`).
-- **Server browser** — favorites/history via `config/serverbrowser.vdf`. Internet lists come from `config/masterserver.vdf` (nothing compiled in). LAN is UDP broadcast. Game/map/ping are filled with A2S.
+- **Server browser** — favorites/history via `config/serverbrowser.vdf`. Internet lists query the baked GoldSrc UDP master (`37.230.210.218:27010`). LAN is UDP broadcast. Game/map/ping are filled with A2S.
 - **HTTP** — real `ISteamHTTP` for FastDL and list fetches (WinINet on Windows, libcurl on Linux).
 - **Voice** — `ISteamUser` capture/encode/decode. Microphone opens only while `+voicerecord` is held. Packets are Steam Voice Opus (24 kHz), so other Vellum/Steam-format clients can hear you. No extra voice plugin.
 
@@ -26,22 +26,7 @@ The engine, filesystem, and `hw` live in [raspad-hl](https://github.com/darwin12
 
 Written next to the game / `steamclient` binary.
 
-**`config/masterserver.vdf`** — Internet tab sources. Missing or empty file means no public search (no compiled-in catalog). Each numbered block needs `address`. Other keys in the same block replace `{name}` in that address. `{offset}` is filled while paging; `{country}` is the OS region unless the block sets `country` itself. `http://` / `https://` is JSON. Anything else is a UDP master (`host` or `host:port`, default `27011`). Several blocks are queried together.
-
-```
-"master"
-{
-	"1"
-	{
-		"address"		"https://api.example/servers?game={game}&status={status}&country={country}&limit={limit}&offset={offset}"
-		"game"			"10"
-		"status"		"1"
-		"limit"			"500"
-	}
-}
-```
-
-**`config/serverbrowser.vdf`** — favorites and history, same layout as stock GoldSrc.
+**`config/serverbrowser.vdf`** — favorites and history, same layout as stock GoldSrc. The Internet tab does not read a VDF; the UDP master address is compiled in.
 
 ## Build
 
@@ -89,7 +74,7 @@ sudo apt install cmake g++ gcc-multilib g++-multilib \
 | **libopus-dev:i386** | Opus (`<opus/opus.h>`, `libopus`) |
 | **libasound2-dev:i386** | ALSA / libasound2 (`alsa/asoundlib.h`) |
 
-To **run** the game you also need **libcurl4:i386** (`libcurl.so.4`). steamclient loads it with `dlopen`, so the binary still starts without it — but HTTP FastDL and HTTP master lists do nothing. Connect, voice, LAN, and UDP masters keep working. Curl is not required to compile.
+To **run** the game you also need **libcurl4:i386** (`libcurl.so.4`). steamclient loads it with `dlopen`, so the binary still starts without it — but HTTP FastDL does nothing. Connect, voice, LAN, and the UDP master keep working. Curl is not required to compile.
 
 ```sh
 sudo apt install libcurl4:i386
@@ -122,9 +107,7 @@ One loader instance at a time. Optional `-launch` / `-appid`. Default game is `c
 
 Release builds write no `vellum.log`. Debug (`build.bat debug`) logs a timestamped session: identity, interfaces, connect ticket, master list, and voice tx/rx.
 
-CMake `-DVELLUM_NO_SERVER_BROWSER=ON` skips `config/masterserver.vdf` so the Internet tab stays empty. Default is **OFF** (read the VDF). Favorites and LAN are unchanged.
-
-CMake `-DVELLUM_AUTH_REVEMU2013=ON` (or `build.bat revemu2013`) sends RevEmu 2013 tickets so Reunion/DProto servers that allow `cid_RevEmu2013` will accept the client. Default is **OFF**: VLLM only, no RevEmu dialect. The two tickets are not mixed in one build.
+CMake `-DVELLUM_NO_SERVER_BROWSER=ON` leaves the Internet tab empty (no baked master query). Default is **OFF**. Favorites and LAN are unchanged.
 
 ## License
 

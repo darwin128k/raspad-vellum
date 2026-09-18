@@ -4,7 +4,6 @@
 #include "steam_query.h"
 #include "steam_http.h"
 #include "steam_voice.h"
-#include "revemu2013.h"
 
 #include <stdarg.h>
 #include <stdio.h>
@@ -1183,6 +1182,7 @@ public:
 };
 
 #define VELLUM_MASTER_CFG_MAX 8
+#define VELLUM_MASTER_BAKED "37.230.210.218:27010"
 
 static VellumFav g_favs[VELLUM_FAV_MAX];
 static int g_fav_n;
@@ -1630,18 +1630,6 @@ static void Vellum_FavSave()
 	fclose(f);
 }
 
-static void Vellum_MasterPath(char *path, size_t pathSize)
-{
-	char dir[512];
-	Vellum_GameDir(dir, sizeof(dir));
-#ifdef _WIN32
-	_snprintf(path, pathSize, "%sconfig\\masterserver.vdf", dir);
-#else
-	snprintf(path, pathSize, "%sconfig/masterserver.vdf", dir);
-#endif
-	path[pathSize - 1] = '\0';
-}
-
 static void Vellum_MasterAddAddr(const char *addr)
 {
 	size_t n;
@@ -1663,172 +1651,8 @@ static void Vellum_MasterAddAddr(const char *addr)
 	g_master_n++;
 }
 
-static int Vellum_MasterReadQuoted(const char **ps, char *out, int outn)
-{
-	const char *s = *ps;
-	int n = 0;
-	if (*s != '"') {
-		return 0;
-	}
-	s++;
-	while (*s && *s != '"' && n < outn - 1) {
-		out[n++] = *s++;
-	}
-	out[n] = '\0';
-	if (*s != '"') {
-		return 0;
-	}
-	*ps = s + 1;
-	return 1;
-}
-
-static void Vellum_MasterReplaceTok(char *s, int sn, const char *tok, const char *val)
-{
-	char buf[512];
-	char *ph;
-	size_t tlen;
-	if (s == NULL || tok == NULL || val == NULL || tok[0] == '\0') {
-		return;
-	}
-	tlen = strlen(tok);
-	while ((ph = strstr(s, tok)) != NULL) {
-#ifdef _WIN32
-		_snprintf(buf, sizeof(buf), "%.*s%s%s", (int)(ph - s), s, val, ph + tlen);
-#else
-		snprintf(buf, sizeof(buf), "%.*s%s%s", (int)(ph - s), s, val, ph + tlen);
-#endif
-		buf[sizeof(buf) - 1] = '\0';
-		strncpy(s, buf, (size_t)sn - 1);
-		s[sn - 1] = '\0';
-	}
-}
-
-static void Vellum_MasterFlushBlock(char *addr, char keys[][32], char vals[][128], int nk)
-{
-	char tok[40];
-	int i;
-	if (addr == NULL || addr[0] == '\0') {
-		return;
-	}
-	for (i = 0; i < nk; i++) {
-		if (keys[i][0] == '\0' || strcmp(keys[i], "offset") == 0) {
-			continue;
-		}
-#ifdef _WIN32
-		_snprintf(tok, sizeof(tok), "{%s}", keys[i]);
-#else
-		snprintf(tok, sizeof(tok), "{%s}", keys[i]);
-#endif
-		Vellum_MasterReplaceTok(addr, 512, tok, vals[i]);
-	}
-	Vellum_MasterAddAddr(addr);
-}
-
-static void Vellum_MasterLoadBytes(const char *text)
-{
-	const char *s = text;
-	int depth = 0;
-	char addr[512];
-	char keys[8][32];
-	char vals[8][128];
-	int nk = 0;
-	addr[0] = '\0';
-	if (s == NULL) {
-		return;
-	}
-	while (*s) {
-		while (*s == ' ' || *s == '\t' || *s == '\r' || *s == '\n') {
-			s++;
-		}
-		if (*s == '{') {
-			depth++;
-			s++;
-			continue;
-		}
-		if (*s == '}') {
-			if (depth == 2) {
-				Vellum_MasterFlushBlock(addr, keys, vals, nk);
-				addr[0] = '\0';
-				nk = 0;
-			}
-			depth--;
-			s++;
-			continue;
-		}
-		if (*s == '"') {
-			char key[64];
-			char val[512];
-			if (!Vellum_MasterReadQuoted(&s, key, (int)sizeof(key))) {
-				s++;
-				continue;
-			}
-			while (*s == ' ' || *s == '\t' || *s == '\r' || *s == '\n') {
-				s++;
-			}
-			if (*s != '"' || !Vellum_MasterReadQuoted(&s, val, (int)sizeof(val))) {
-				continue;
-			}
-			if (depth < 2) {
-				continue;
-			}
-			if (strcmp(key, "address") == 0) {
-				strncpy(addr, val, sizeof(addr) - 1);
-				addr[sizeof(addr) - 1] = '\0';
-			} else if (nk < 8) {
-				strncpy(keys[nk], key, sizeof(keys[0]) - 1);
-				keys[nk][sizeof(keys[0]) - 1] = '\0';
-				strncpy(vals[nk], val, sizeof(vals[0]) - 1);
-				vals[nk][sizeof(vals[0]) - 1] = '\0';
-				nk++;
-			}
-			continue;
-		}
-		s++;
-	}
-	if (addr[0] != '\0') {
-		Vellum_MasterFlushBlock(addr, keys, vals, nk);
-	}
-}
-
-static void Vellum_MasterLoadFile(const char *path)
-{
-	FILE *f;
-	char *text;
-	long sz;
-	size_t n;
-	f = fopen(path, "rb");
-	if (f == NULL) {
-		return;
-	}
-	if (fseek(f, 0, SEEK_END) != 0) {
-		fclose(f);
-		return;
-	}
-	sz = ftell(f);
-	if (sz <= 0 || sz > 64 * 1024) {
-		fclose(f);
-		return;
-	}
-	if (fseek(f, 0, SEEK_SET) != 0) {
-		fclose(f);
-		return;
-	}
-	text = (char *)malloc((size_t)sz + 1);
-	if (text == NULL) {
-		fclose(f);
-		return;
-	}
-	n = fread(text, 1, (size_t)sz, f);
-	fclose(f);
-	text[n] = '\0';
-	Vellum_MasterLoadBytes(text);
-	free(text);
-}
-
 static void Vellum_MasterLoad()
 {
-	char path[512];
-	int i;
 	if (g_master_loaded) {
 		return;
 	}
@@ -1838,16 +1662,8 @@ static void Vellum_MasterLoad()
 	Vellum_Log("master search disabled");
 	return;
 #endif
-	Vellum_MasterPath(path, sizeof(path));
-	Vellum_MasterLoadFile(path);
-	if (g_master_n <= 0) {
-		Vellum_Log("master none %s", path);
-		return;
-	}
-	Vellum_Log("master file %s n=%d", path, g_master_n);
-	for (i = 0; i < g_master_n; i++) {
-		Vellum_Log("master [%d] %s", i + 1, g_master_addrs[i]);
-	}
+	Vellum_MasterAddAddr(VELLUM_MASTER_BAKED);
+	Vellum_Log("master baked %s", VELLUM_MASTER_BAKED);
 }
 
 static int Vellum_FavFind(AppId_t app, uint32 ip, uint16 conn, uint16 query)
@@ -2458,10 +2274,6 @@ static CSteamID Vellum_GameServerSteamId()
 
 static CSteamID Vellum_SteamIdFromAuthBlob(const void *blob, int len)
 {
-	uint32_t acc = 0;
-	if (RevEmu2013_AccountIdFromTicket(blob, len, &acc)) {
-		return CSteamID(acc, k_EUniversePublic, k_EAccountTypeIndividual);
-	}
 	if (blob != NULL && len == (int)sizeof(VellumTicket)) {
 		const VellumTicket *t = (const VellumTicket *)blob;
 		if (Vellum_TicketValid(t, (size_t)len)) {

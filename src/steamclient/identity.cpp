@@ -1,5 +1,4 @@
 #include "identity.h"
-#include "revemu2013.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -218,23 +217,13 @@ void Vellum_InitIdentity()
 	FillPersona(g_id.persona, sizeof(g_id.persona));
 	FillIdent(g_id.ident, sizeof(g_id.ident), &g_id.ident_len, g_id.auth_key, sizeof(g_id.auth_key));
 
-#ifdef VELLUM_AUTH_REVEMU2013
-	g_id.account_id = RevEmu2013_AccountId(g_id.auth_key);
-#else
 	g_id.account_id = Vellum_AccountIdFromIdent(g_id.ident, g_id.ident_len);
-#endif
 	g_id.app_id = ReadAppId(dir);
 	g_id.steam_id = CSteamID(g_id.account_id, k_EUniversePublic, k_EAccountTypeIndividual);
 	g_ready = 1;
-#ifdef VELLUM_AUTH_REVEMU2013
-	Vellum_Log("ident kind=revemu2013 persona=%s id=%s authkey=%s account=%u app=%u steamid=%llu",
-	           g_id.persona, g_id.ident, g_id.auth_key, (unsigned)g_id.account_id, (unsigned)g_id.app_id,
-	           (unsigned long long)g_id.steam_id.ConvertToUint64());
-#else
 	Vellum_Log("ident kind=vellum persona=%s id=%s account=%u app=%u steamid=%llu",
 	           g_id.persona, g_id.ident, (unsigned)g_id.account_id, (unsigned)g_id.app_id,
 	           (unsigned long long)g_id.steam_id.ConvertToUint64());
-#endif
 }
 
 const VellumIdentity &Vellum_GetIdentity()
@@ -246,9 +235,6 @@ const VellumIdentity &Vellum_GetIdentity()
 int Vellum_WriteAuthBlob(void *blob, int maxBytes)
 {
 	const VellumIdentity &id = Vellum_GetIdentity();
-#ifdef VELLUM_AUTH_REVEMU2013
-	return RevEmu2013_WriteTicket(blob, maxBytes, id.auth_key);
-#else
 	VellumTicket ticket;
 	if (blob == NULL || maxBytes < (int)sizeof(VellumTicket)) {
 		return 0;
@@ -258,5 +244,4 @@ int Vellum_WriteAuthBlob(void *blob, int maxBytes)
 	}
 	memcpy(blob, &ticket, sizeof(ticket));
 	return (int)sizeof(ticket);
-#endif
 }
