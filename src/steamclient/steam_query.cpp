@@ -18,6 +18,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <netinet/in.h>
+#include <strings.h>
 #include <sys/socket.h>
 #include <unistd.h>
 typedef int SOCKET;
@@ -26,9 +27,15 @@ typedef int SOCKET;
 #define closesocket close
 #endif
 
+#ifdef _WIN32
+#define Vellum_StrNicmp _strnicmp
+#else
+#define Vellum_StrNicmp strncasecmp
+#endif
+
 #define VELLUM_QUERY_MAX 24
 #define VELLUM_QUERY_TIMEOUT 3000
-#define VELLUM_MASTER_MAX 4
+#define VELLUM_MASTER_MAX 8
 #define VELLUM_MASTER_TIMEOUT 4000
 #define VELLUM_LAN_TIMEOUT 2000
 
@@ -624,6 +631,7 @@ struct VellumHttpList {
 	int read;
 	uint32 ips[512];
 	uint16 ports[512];
+	char url[512];
 	VellumMasterCb cb;
 	void *user;
 	HANDLE thread;
@@ -641,37 +649,8 @@ struct VellumHttpList {
 static VellumMaster g_masters[VELLUM_MASTER_MAX];
 static VellumLan g_lans[VELLUM_MASTER_MAX];
 static VellumHttpList g_httplists[VELLUM_MASTER_MAX];
-static uint32 g_master_ip;
-static int g_master_ip_ok;
 
-static uint32 Vellum_MasterResolve()
-{
-	struct addrinfo hints;
-	struct addrinfo *res = NULL;
-	uint32 ip = 0;
-	static const uint32 fallbacks[] = {
-		(208u << 24) | (64u << 16) | (200u << 8) | 52u,
-		(208u << 24) | (64u << 16) | (200u << 8) | 39u,
-		(208u << 24) | (64u << 16) | (200u << 8) | 65u
-	};
-	if (g_master_ip_ok) {
-		return g_master_ip;
-	}
-	memset(&hints, 0, sizeof(hints));
-	hints.ai_family = AF_INET;
-	hints.ai_socktype = SOCK_DGRAM;
-	if (getaddrinfo("hl2master.steampowered.com", NULL, &hints, &res) == 0 && res != NULL) {
-		struct sockaddr_in *in = (struct sockaddr_in *)res->ai_addr;
-		ip = ntohl(in->sin_addr.s_addr);
-		freeaddrinfo(res);
-	}
-	if (ip == 0) {
-		ip = fallbacks[0];
-	}
-	g_master_ip = ip;
-	g_master_ip_ok = 1;
-	return ip;
-}
+static void Vellum_MasterSend(VellumMaster *m);
 
 static void Vellum_MasterClose(VellumMaster *m)
 {
@@ -682,6 +661,69 @@ static void Vellum_MasterClose(VellumMaster *m)
 	m->used = 0;
 	m->cb = NULL;
 	m->user = NULL;
+}
+
+static int Vellum_ResolveHost(const char *host, uint32 *ip)
+{
+	struct addrinfo hints;
+	struct addrinfo *res = NULL;
+	unsigned a = 0, b = 0, c = 0, d = 0;
+	if (host == NULL || host[0] == '\0' || ip == NULL) {
+		return 0;
+	}
+	if (sscanf(host, "%u.%u.%u.%u", &a, &b, &c, &d) == 4 &&
+	    a <= 255 && b <= 255 && c <= 255 && d <= 255 &&
+	    strchr(host, ':') == NULL && strspn(host, "0123456789.") == strlen(host)) {
+		*ip = (a << 24) | (b << 16) | (c << 8) | d;
+		return 1;
+	}
+	memset(&hints, 0, sizeof(hints));
+	hints.ai_family = AF_INET;
+	hints.ai_socktype = SOCK_DGRAM;
+	if (getaddrinfo(host, NULL, &hints, &res) != 0 || res == NULL) {
+		return 0;
+	}
+	{
+		struct sockaddr_in *in = (struct sockaddr_in *)res->ai_addr;
+		*ip = ntohl(in->sin_addr.s_addr);
+	}
+	freeaddrinfo(res);
+	return *ip != 0;
+}
+
+static int Vellum_UdpMasterStart(const char *host, uint16 port, const char *filter, VellumMasterCb cb, void *user)
+{
+	int i;
+	VellumMaster *m = NULL;
+	uint32 ip = 0;
+	if (cb == NULL || host == NULL || !Vellum_ResolveHost(host, &ip)) {
+		Vellum_Log("Master UDP resolve fail %s", host ? host : "");
+		return 0;
+	}
+	for (i = 0; i < VELLUM_MASTER_MAX; i++) {
+		if (!g_masters[i].used) {
+			m = &g_masters[i];
+			break;
+		}
+	}
+	if (m == NULL) {
+		return 0;
+	}
+	memset(m, 0, sizeof(*m));
+	m->sock = Vellum_OpenUdp();
+	if (m->sock == INVALID_SOCKET) {
+		return 0;
+	}
+	m->used = 1;
+	m->master_ip = ip;
+	m->master_port = port ? port : 27011;
+	m->cb = cb;
+	m->user = user;
+	strncpy(m->filter, filter ? filter : "", sizeof(m->filter) - 1);
+	strncpy(m->seed, "0.0.0.0:0", sizeof(m->seed) - 1);
+	Vellum_Log("Master UDP %s:%u filter=%s", host, (unsigned)m->master_port, m->filter);
+	Vellum_MasterSend(m);
+	return 1;
 }
 
 static void Vellum_LanClose(VellumLan *l)
@@ -878,9 +920,14 @@ static int Vellum_HttpListFetch(const char *url, char **out, int *outn)
 	if (ses == NULL) {
 		return 0;
 	}
-	req = InternetOpenUrlA(ses, url, NULL, 0,
-	                       INTERNET_FLAG_RELOAD | INTERNET_FLAG_NO_CACHE_WRITE | INTERNET_FLAG_SECURE |
-	                       INTERNET_FLAG_NO_UI | INTERNET_FLAG_NO_COOKIES, 0);
+	{
+		DWORD flags = INTERNET_FLAG_RELOAD | INTERNET_FLAG_NO_CACHE_WRITE |
+		              INTERNET_FLAG_NO_UI | INTERNET_FLAG_NO_COOKIES;
+		if (Vellum_StrNicmp(url, "https://", 8) == 0) {
+			flags |= INTERNET_FLAG_SECURE;
+		}
+		req = InternetOpenUrlA(ses, url, NULL, 0, flags, 0);
+	}
 	if (req == NULL) {
 		InternetCloseHandle(ses);
 		return 0;
@@ -931,12 +978,29 @@ static int Vellum_HttpListParse(const char *json, VellumHttpList *h)
 {
 	const char *p = json;
 	int added = 0;
-	while ((p = strstr(p, "\"connect\"")) != NULL) {
+	while (p != NULL && *p) {
+		const char *a = strstr(p, "\"connect\"");
+		const char *b = strstr(p, "\"addr\":");
+		const char *hit;
 		char addr[64];
 		int n = 0;
 		uint32 ip = 0;
 		uint16 port = 0;
-		p += 9;
+		if (a != NULL && b != NULL) {
+			hit = a < b ? a : b;
+		} else {
+			hit = a ? a : b;
+		}
+		if (hit == NULL) {
+			break;
+		}
+		p = hit;
+		while (*p && *p != ':') {
+			p++;
+		}
+		if (*p == ':') {
+			p++;
+		}
 		while (*p && *p != '"') {
 			p++;
 		}
@@ -951,6 +1015,9 @@ static int Vellum_HttpListParse(const char *json, VellumHttpList *h)
 		if (h->abort) {
 			break;
 		}
+		if (*p == '"') {
+			p++;
+		}
 		if (Vellum_ParseDottedAddr(addr, &ip, &port)) {
 			Vellum_HttpListPush(h, ip, port);
 			added++;
@@ -959,26 +1026,45 @@ static int Vellum_HttpListParse(const char *json, VellumHttpList *h)
 	return added;
 }
 
+static void Vellum_HttpListMakeUrl(char *out, int outn, const char *tmpl, int offset)
+{
+	const char *ph;
+	if (tmpl == NULL || out == NULL || outn <= 0) {
+		return;
+	}
+	ph = strstr(tmpl, "{offset}");
+	if (ph == NULL) {
+		strncpy(out, tmpl, (size_t)outn - 1);
+		out[outn - 1] = '\0';
+		return;
+	}
+#ifdef _WIN32
+	_snprintf(out, (size_t)outn, "%.*s%d%s", (int)(ph - tmpl), tmpl, offset, ph + 8);
+#else
+	snprintf(out, (size_t)outn, "%.*s%d%s", (int)(ph - tmpl), tmpl, offset, ph + 8);
+#endif
+	out[outn - 1] = '\0';
+}
+
 static DWORD WINAPI Vellum_HttpListWorker(LPVOID param)
 {
 	VellumHttpList *h = (VellumHttpList *)param;
 	int offset;
 	int added_total = 0;
+	int paged = strstr(h->url, "{offset}") != NULL;
 	for (offset = 0; offset < 500 && !h->abort; offset += 100) {
-		char url[256];
+		char url[768];
 		char *body = NULL;
 		int n = 0;
 		int added;
-		_snprintf(url, sizeof(url),
-		          "https://api.gamemonitoring.net/servers?game=10&limit=100&offset=%d", offset);
-		url[sizeof(url) - 1] = '\0';
+		Vellum_HttpListMakeUrl(url, (int)sizeof(url), h->url, offset);
 		if (!Vellum_HttpListFetch(url, &body, &n) || body == NULL) {
 			break;
 		}
 		added = Vellum_HttpListParse(body, h);
 		free(body);
 		added_total += added;
-		if (added < 100) {
+		if (!paged || added < 100) {
 			break;
 		}
 	}
@@ -1039,10 +1125,13 @@ static void Vellum_HttpListThink()
 	}
 }
 
-static int Vellum_HttpListStart(VellumMasterCb cb, void *user)
+static int Vellum_HttpListStart(const char *url, VellumMasterCb cb, void *user)
 {
 	int i;
 	VellumHttpList *h = NULL;
+	if (url == NULL || url[0] == '\0') {
+		return 0;
+	}
 	for (i = 0; i < VELLUM_MASTER_MAX; i++) {
 		if (!g_httplists[i].used) {
 			h = &g_httplists[i];
@@ -1058,6 +1147,7 @@ static int Vellum_HttpListStart(VellumMasterCb cb, void *user)
 	h->used = 1;
 	h->cb = cb;
 	h->user = user;
+	strncpy(h->url, url, sizeof(h->url) - 1);
 	h->thread = CreateThread(NULL, 0, Vellum_HttpListWorker, h, 0, NULL);
 	if (h->thread == NULL) {
 		DeleteCriticalSection(&h->lock);
@@ -1065,24 +1155,61 @@ static int Vellum_HttpListStart(VellumMasterCb cb, void *user)
 		h->used = 0;
 		return 0;
 	}
-	Vellum_Log("HttpList start");
+	Vellum_Log("HttpList start %s", h->url);
 	return 1;
 }
 #endif
 
-int Vellum_MasterStart(const char *filter, VellumMasterCb cb, void *user)
+static int Vellum_SplitHostPort(const char *addr, char *host, size_t hostn, uint16 *port)
 {
-	Vellum_QueryInit();
-	if (cb == NULL) {
+	const char *colon;
+	size_t n;
+	if (addr == NULL || host == NULL || hostn == 0 || port == NULL) {
 		return 0;
 	}
-	(void)filter;
-	Vellum_MasterCancel(user);
+	while (*addr == ' ' || *addr == '\t') {
+		addr++;
+	}
+	colon = strrchr(addr, ':');
+	if (colon != NULL && colon != addr && strchr(addr, ':') == colon) {
+		n = (size_t)(colon - addr);
+		if (n >= hostn) {
+			n = hostn - 1;
+		}
+		memcpy(host, addr, n);
+		host[n] = '\0';
+		*port = (uint16)strtoul(colon + 1, NULL, 10);
+		if (*port == 0) {
+			*port = 27011;
+		}
+		return host[0] != '\0';
+	}
+	strncpy(host, addr, hostn - 1);
+	host[hostn - 1] = '\0';
+	*port = 27011;
+	return host[0] != '\0';
+}
+
+int Vellum_MasterAdd(const char *address, const char *filter, VellumMasterCb cb, void *user)
+{
+	char host[256];
+	uint16 port = 27011;
+	Vellum_QueryInit();
+	if (cb == NULL || address == NULL || address[0] == '\0') {
+		return 0;
+	}
+	if (Vellum_StrNicmp(address, "http://", 7) == 0 || Vellum_StrNicmp(address, "https://", 8) == 0) {
 #ifdef _WIN32
-	return Vellum_HttpListStart(cb, user);
+		return Vellum_HttpListStart(address, cb, user);
 #else
-	return 0;
+		(void)filter;
+		return 0;
 #endif
+	}
+	if (!Vellum_SplitHostPort(address, host, sizeof(host), &port)) {
+		return 0;
+	}
+	return Vellum_UdpMasterStart(host, port, filter, cb, user);
 }
 
 int Vellum_LanStart(VellumMasterCb cb, void *user)

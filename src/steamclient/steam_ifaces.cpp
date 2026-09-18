@@ -1090,6 +1090,7 @@ struct VellumListReq {
 	int ping_next;
 	int ping_done;
 	int master_done;
+	int master_pending;
 	int kind;
 	AppId_t app;
 	char filter[512];
@@ -1104,10 +1105,17 @@ public:
 	virtual void RefreshComplete(HServerListRequest, int) = 0;
 };
 
+#define VELLUM_MASTER_CFG_MAX 8
+#define VELLUM_MASTER_DEFAULT_URL \
+	"https://api.gamemonitoring.net/servers?game=10&limit=100&offset={offset}"
+
 static VellumFav g_favs[VELLUM_FAV_MAX];
 static int g_fav_n;
 static int g_fav_loaded;
 static VellumListReq g_reqs[VELLUM_REQ_MAX];
+static char g_master_addrs[VELLUM_MASTER_CFG_MAX][512];
+static int g_master_n;
+static int g_master_loaded;
 
 static int Vellum_FavFind(AppId_t app, uint32 ip, uint16 conn, uint16 query);
 
@@ -1366,6 +1374,118 @@ static void Vellum_FavSave()
 	fclose(f);
 }
 
+static void Vellum_MasterPath(char *path, size_t pathSize)
+{
+	char dir[512];
+	Vellum_GameDir(dir, sizeof(dir));
+#ifdef _WIN32
+	_snprintf(path, pathSize, "%sconfig\\master.vdf", dir);
+#else
+	snprintf(path, pathSize, "%sconfig/master.vdf", dir);
+#endif
+	path[pathSize - 1] = '\0';
+}
+
+static void Vellum_MasterWriteDefault(const char *path)
+{
+	FILE *f;
+	char dir[512];
+	char cfg[512];
+	Vellum_GameDir(dir, sizeof(dir));
+#ifdef _WIN32
+	_snprintf(cfg, sizeof(cfg), "%sconfig", dir);
+	CreateDirectoryA(cfg, NULL);
+#else
+	snprintf(cfg, sizeof(cfg), "%sconfig", dir);
+	mkdir(cfg, 0755);
+#endif
+	f = fopen(path, "w");
+	if (f == NULL) {
+		return;
+	}
+	fprintf(f, "\"master\"\n{\n");
+	fprintf(f, "\t\"1\"\n\t{\n");
+	fprintf(f, "\t\t\"address\"\t\t\"%s\"\n", VELLUM_MASTER_DEFAULT_URL);
+	fprintf(f, "\t}\n}\n");
+	fclose(f);
+	Vellum_Log("Master wrote default %s", path);
+}
+
+static void Vellum_MasterAddAddr(const char *addr)
+{
+	size_t n;
+	if (addr == NULL || addr[0] == '\0' || g_master_n >= VELLUM_MASTER_CFG_MAX) {
+		return;
+	}
+	while (*addr == ' ' || *addr == '\t') {
+		addr++;
+	}
+	n = strlen(addr);
+	while (n > 0 && (addr[n - 1] == ' ' || addr[n - 1] == '\t' || addr[n - 1] == '\r' || addr[n - 1] == '\n')) {
+		n--;
+	}
+	if (n == 0 || n >= sizeof(g_master_addrs[0])) {
+		return;
+	}
+	memcpy(g_master_addrs[g_master_n], addr, n);
+	g_master_addrs[g_master_n][n] = '\0';
+	g_master_n++;
+}
+
+static void Vellum_MasterLoadFile(const char *path)
+{
+	FILE *f = fopen(path, "r");
+	char line[768];
+	if (f == NULL) {
+		return;
+	}
+	while (fgets(line, sizeof(line), f) != NULL) {
+		char *q1;
+		char *q2;
+		char *q3;
+		char *q4;
+		if (strstr(line, "\"address\"") == NULL) {
+			continue;
+		}
+		q1 = strchr(line, '"');
+		q2 = q1 ? strchr(q1 + 1, '"') : NULL;
+		q3 = q2 ? strchr(q2 + 1, '"') : NULL;
+		q4 = q3 ? strchr(q3 + 1, '"') : NULL;
+		if (q3 && q4 && (q4 - q3 - 1) > 0) {
+			size_t n = (size_t)(q4 - q3 - 1);
+			char addr[512];
+			if (n >= sizeof(addr)) {
+				n = sizeof(addr) - 1;
+			}
+			memcpy(addr, q3 + 1, n);
+			addr[n] = '\0';
+			Vellum_MasterAddAddr(addr);
+		}
+	}
+	fclose(f);
+}
+
+static void Vellum_MasterLoad()
+{
+	char path[512];
+	FILE *probe;
+	if (g_master_loaded) {
+		return;
+	}
+	g_master_loaded = 1;
+	g_master_n = 0;
+	Vellum_MasterPath(path, sizeof(path));
+	probe = fopen(path, "r");
+	if (probe != NULL) {
+		fclose(probe);
+		Vellum_MasterLoadFile(path);
+	} else {
+		Vellum_MasterWriteDefault(path);
+		Vellum_MasterAddAddr(VELLUM_MASTER_DEFAULT_URL);
+	}
+	Vellum_Log("Master loaded n=%d", g_master_n);
+}
+
 static int Vellum_FavFind(AppId_t app, uint32 ip, uint16 conn, uint16 query)
 {
 	int i;
@@ -1523,12 +1643,18 @@ static void Vellum_OnMaster(void *user, uint32 ip, uint16 port, int finished)
 		return;
 	}
 	if (finished) {
-		req->master_done = 1;
-		Vellum_Log("Master done count=%d", req->count);
+		if (req->master_pending > 0) {
+			req->master_pending--;
+		}
+		if (req->master_pending <= 0) {
+			req->master_done = 1;
+		}
+		Vellum_Log("Master source done pending=%d count=%d", req->master_pending, req->count);
 		return;
 	}
 	if (req->count >= VELLUM_LIST_MAX) {
 		Vellum_MasterCancel(req);
+		req->master_pending = 0;
 		req->master_done = 1;
 		return;
 	}
@@ -1651,16 +1777,37 @@ static HServerListRequest Vellum_ListRequest(AppId_t app, uint32 flagMask, void 
 	return (HServerListRequest)req;
 }
 
+static int Vellum_StartInternetMasters(VellumListReq *req)
+{
+	int i;
+	int n = 0;
+	Vellum_MasterLoad();
+	req->master_pending = 0;
+	req->master_done = 0;
+	for (i = 0; i < g_master_n; i++) {
+		if (Vellum_MasterAdd(g_master_addrs[i], req->filter, Vellum_OnMaster, req)) {
+			req->master_pending++;
+			n++;
+			Vellum_Log("Master add %s", g_master_addrs[i]);
+		} else {
+			Vellum_Log("Master add fail %s", g_master_addrs[i]);
+		}
+	}
+	if (req->master_pending == 0) {
+		req->master_done = 1;
+	}
+	return n;
+}
+
 static HServerListRequest Vellum_ListRequestInternet(AppId_t app, void **filters, uint32 nfilters, void *cb, int spectator)
 {
 	VellumListReq *req = Vellum_AllocReq(cb);
 	req->kind = VELLUM_LIST_INTERNET;
 	req->app = app ? app : 10;
 	Vellum_BuildMasterFilter(req->filter, sizeof(req->filter), req->app, filters, nfilters, spectator);
-	if (!Vellum_MasterStart(req->filter, Vellum_OnMaster, req)) {
-		req->master_done = 1;
-	}
-	Vellum_Log("ListInternet app=%u spec=%d filter=%s cb=%p", (unsigned)req->app, spectator, req->filter, cb);
+	Vellum_StartInternetMasters(req);
+	Vellum_Log("ListInternet app=%u spec=%d filter=%s masters=%d cb=%p",
+	           (unsigned)req->app, spectator, req->filter, req->master_pending, cb);
 	return (HServerListRequest)req;
 }
 
@@ -1730,10 +1877,8 @@ static void Vellum_RefreshListQuery(HServerListRequest h)
 	req->notified = 0;
 	if (req->kind == VELLUM_LIST_INTERNET) {
 		req->count = 0;
-		req->master_done = 0;
-		if (!Vellum_MasterStart(req->filter, Vellum_OnMaster, req)) {
-			req->master_done = 1;
-		}
+		Vellum_MasterCancel(req);
+		Vellum_StartInternetMasters(req);
 	} else if (req->kind == VELLUM_LIST_LAN) {
 		req->count = 0;
 		req->master_done = 0;

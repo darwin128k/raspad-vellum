@@ -12,6 +12,6 @@ void Vellum_QueryCancel(HServerQuery q);
 int Vellum_QueryBusyCount();
 
 typedef void (*VellumMasterCb)(void *user, uint32 ip, uint16 port, int finished);
-int Vellum_MasterStart(const char *filter, VellumMasterCb cb, void *user);
+int Vellum_MasterAdd(const char *address, const char *filter, VellumMasterCb cb, void *user);
 int Vellum_LanStart(VellumMasterCb cb, void *user);
 void Vellum_MasterCancel(void *user);
