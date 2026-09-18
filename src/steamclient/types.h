@@ -105,3 +105,32 @@ struct SteamParamStringArray_t {
 	const char **m_ppStrings;
 	int32 m_nNumStrings;
 };
+
+#pragma pack(push, 4)
+struct VellumServerNetAdr {
+	uint16 conn;
+	uint16 query;
+	uint32 ip;
+};
+
+struct VellumGameServerItem {
+	VellumServerNetAdr adr;
+	int ping;
+	bool hadResponse;
+	bool doNotRefresh;
+	char gameDir[32];
+	char map[32];
+	char desc[64];
+	uint32 appId;
+	int players;
+	int maxPlayers;
+	int bots;
+	bool password;
+	bool secure;
+	uint32 lastPlayed;
+	int version;
+	char name[64];
+	char tags[128];
+	uint64 steamId;
+};
+#pragma pack(pop)

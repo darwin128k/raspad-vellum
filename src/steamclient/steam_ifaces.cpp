@@ -1,6 +1,7 @@
 #include "types.h"
 #include "identity.h"
 #include "exports.h"
+#include "steam_query.h"
 
 #include <stdarg.h>
 #include <stdio.h>
@@ -99,6 +100,7 @@ static int Vellum_FillAuthTicket(void *pTicket, int cbMaxTicket, uint32 *pcbTick
 static void *Vellum_PickUser(const char *ver);
 static void *Vellum_PickFriends(const char *ver);
 static void Vellum_FlushListCallbacks();
+static void Vellum_RefreshListServer(HServerListRequest h, int i);
 
 class SteamUser {
 public:
@@ -501,6 +503,7 @@ public:
 enum { k_unFavoriteFlagFavorite = 0x01 };
 enum { k_unFavoriteFlagHistory = 0x02 };
 
+struct VellumListReq;
 static int Vellum_FavCount();
 static bool Vellum_FavGet(int i, AppId_t *app, uint32 *ip, uint16 *conn, uint16 *query, uint32 *flags, uint32 *played);
 static int Vellum_FavAdd(AppId_t app, uint32 ip, uint16 conn, uint16 query, uint32 flags, uint32 played);
@@ -509,6 +512,9 @@ static HServerListRequest Vellum_ListRequest(AppId_t app, uint32 flagMask, void 
 static void Vellum_ListRelease(HServerListRequest h);
 static void *Vellum_ListDetails(HServerListRequest h, int i);
 static int Vellum_ListCount(HServerListRequest h);
+static void Vellum_RefreshListServer(HServerListRequest h, int i);
+static void Vellum_RefreshListQuery(HServerListRequest h);
+static bool Vellum_ListIsRefreshing(HServerListRequest h);
 
 class SteamHTTP {
 public:
@@ -606,14 +612,28 @@ public:
 	virtual void ReleaseRequest(HServerListRequest h) { Vellum_ListRelease(h); }
 	virtual void *GetServerDetails(HServerListRequest h, int i) { return Vellum_ListDetails(h, i); }
 	virtual void CancelQuery(HServerListRequest) {}
-	virtual void RefreshQuery(HServerListRequest) {}
-	virtual bool IsRefreshing(HServerListRequest) { return false; }
+	virtual void RefreshQuery(HServerListRequest h) { Vellum_RefreshListQuery(h); }
+	virtual bool IsRefreshing(HServerListRequest h) { return Vellum_ListIsRefreshing(h); }
 	virtual int GetServerCount(HServerListRequest h) { return Vellum_ListCount(h); }
-	virtual void RefreshServer(HServerListRequest, int) {}
-	virtual HServerQuery PingServer(uint32, uint16, void *) { return 0; }
-	virtual HServerQuery PlayerDetails(uint32, uint16, void *) { return 0; }
-	virtual HServerQuery ServerRules(uint32, uint16, void *) { return 0; }
-	virtual void CancelServerQuery(HServerQuery) {}
+	virtual void RefreshServer(HServerListRequest h, int i)
+	{
+		Vellum_RefreshListServer(h, i);
+	}
+	virtual HServerQuery PingServer(uint32 ip, uint16 port, void *cb)
+	{
+		Vellum_Log("PingServer %u:%u", ip, (unsigned)port);
+		return Vellum_QueryPing(ip, port, cb);
+	}
+	virtual HServerQuery PlayerDetails(uint32 ip, uint16 port, void *cb)
+	{
+		Vellum_Log("PlayerDetails %u:%u", ip, (unsigned)port);
+		return Vellum_QueryPlayers(ip, port, cb);
+	}
+	virtual HServerQuery ServerRules(uint32 ip, uint16 port, void *cb)
+	{
+		return Vellum_QueryRules(ip, port, cb);
+	}
+	virtual void CancelServerQuery(HServerQuery q) { Vellum_QueryCancel(q); }
 };
 
 class SteamUserStats {
@@ -1058,37 +1078,12 @@ struct VellumFav {
 	uint32 played;
 };
 
-struct VellumServerNetAdr {
-	uint16 conn;
-	uint16 query;
-	uint32 ip;
-};
-
-struct VellumGameServerItem {
-	VellumServerNetAdr adr;
-	int ping;
-	bool hadResponse;
-	bool doNotRefresh;
-	char gameDir[32];
-	char map[32];
-	char desc[64];
-	uint32 appId;
-	int players;
-	int maxPlayers;
-	int bots;
-	bool password;
-	bool secure;
-	uint32 lastPlayed;
-	int version;
-	char name[64];
-	char tags[128];
-	uint64 steamId;
-};
-
 struct VellumListReq {
 	int used;
 	int count;
 	int notified;
+	int ping_next;
+	int ping_done;
 	void *cb;
 	VellumGameServerItem items[VELLUM_FAV_MAX];
 };
@@ -1451,6 +1446,7 @@ static void Vellum_FillItem(VellumGameServerItem *it, const VellumFav *e)
 	it->maxPlayers = 32;
 	it->ping = 0;
 	strncpy(it->gameDir, "cstrike", sizeof(it->gameDir) - 1);
+	strncpy(it->desc, "Counter-Strike", sizeof(it->desc) - 1);
 	b = (unsigned char *)&e->ip;
 #ifdef _WIN32
 	_snprintf(it->name, sizeof(it->name), "%u.%u.%u.%u:%u",
@@ -1527,21 +1523,127 @@ static int Vellum_ListCount(HServerListRequest h)
 	return req != NULL ? req->count : 0;
 }
 
+static void Vellum_RefreshListQuery(HServerListRequest h)
+{
+	VellumListReq *req = (VellumListReq *)h;
+	if (req != NULL && req->used) {
+		req->ping_next = 0;
+		req->ping_done = 0;
+		req->notified = 0;
+	}
+}
+
+static bool Vellum_ListIsRefreshing(HServerListRequest h)
+{
+	VellumListReq *req = (VellumListReq *)h;
+	return req != NULL && req->used && req->ping_done < req->count;
+}
+
+static void Vellum_OnListPing(void *user, int ok, const VellumGameServerItem *item)
+{
+	size_t u = (size_t)user;
+	int r = (int)(u / VELLUM_FAV_MAX);
+	int i = (int)(u % VELLUM_FAV_MAX);
+	VellumListReq *req;
+	SteamServerListResponse *cb;
+	if (r < 0 || r >= VELLUM_REQ_MAX) {
+		return;
+	}
+	req = &g_reqs[r];
+	if (!req->used || i < 0 || i >= req->count) {
+		return;
+	}
+	if (req->ping_done < req->count) {
+		req->ping_done++;
+	}
+	if (ok && item != NULL) {
+		req->items[i].ping = item->ping;
+		req->items[i].players = item->players;
+		req->items[i].maxPlayers = item->maxPlayers ? item->maxPlayers : req->items[i].maxPlayers;
+		req->items[i].bots = item->bots;
+		req->items[i].password = item->password;
+		req->items[i].secure = item->secure;
+		req->items[i].hadResponse = true;
+		if (item->name[0]) {
+			strncpy(req->items[i].name, item->name, sizeof(req->items[i].name) - 1);
+			req->items[i].name[sizeof(req->items[i].name) - 1] = '\0';
+		}
+		if (item->map[0]) {
+			strncpy(req->items[i].map, item->map, sizeof(req->items[i].map) - 1);
+			req->items[i].map[sizeof(req->items[i].map) - 1] = '\0';
+		}
+		if (item->gameDir[0]) {
+			strncpy(req->items[i].gameDir, item->gameDir, sizeof(req->items[i].gameDir) - 1);
+			req->items[i].gameDir[sizeof(req->items[i].gameDir) - 1] = '\0';
+		}
+		if (item->desc[0]) {
+			strncpy(req->items[i].desc, item->desc, sizeof(req->items[i].desc) - 1);
+			req->items[i].desc[sizeof(req->items[i].desc) - 1] = '\0';
+		}
+	}
+	cb = (SteamServerListResponse *)req->cb;
+	if (cb != NULL) {
+		cb->ServerResponded((HServerListRequest)req, i);
+	}
+	Vellum_Log("ListPing i=%d ok=%d map=%s game=%s players=%d ping=%d",
+	           i, ok, req->items[i].map, req->items[i].desc, req->items[i].players, req->items[i].ping);
+}
+
+static void Vellum_StartListPings()
+{
+	int r;
+	for (r = 0; r < VELLUM_REQ_MAX; r++) {
+		VellumListReq *req = &g_reqs[r];
+		if (!req->used) {
+			continue;
+		}
+		while (req->ping_next < req->count) {
+			int i = req->ping_next;
+			uint16 port = req->items[i].adr.query ? req->items[i].adr.query : req->items[i].adr.conn;
+			void *user = (void *)(size_t)(r * VELLUM_FAV_MAX + i);
+			if (Vellum_QueryInfo(req->items[i].adr.ip, port, Vellum_OnListPing, user) == 0) {
+				break;
+			}
+			req->ping_next++;
+			Vellum_Log("ListPingStart i=%d ip=%u port=%u", i, req->items[i].adr.ip, (unsigned)port);
+		}
+	}
+}
+
+static void Vellum_RefreshListServer(HServerListRequest h, int i)
+{
+	VellumListReq *req = (VellumListReq *)h;
+	int r;
+	uint16 port;
+	void *user;
+	if (req == NULL || i < 0 || i >= req->count) {
+		return;
+	}
+	r = (int)(req - g_reqs);
+	if (r < 0 || r >= VELLUM_REQ_MAX) {
+		return;
+	}
+	port = req->items[i].adr.query ? req->items[i].adr.query : req->items[i].adr.conn;
+	user = (void *)(size_t)(r * VELLUM_FAV_MAX + i);
+	Vellum_QueryInfo(req->items[i].adr.ip, port, Vellum_OnListPing, user);
+}
+
 static void Vellum_FlushListCallbacks()
 {
 	int r;
-	int i;
+	Vellum_QueryThink();
+	Vellum_StartListPings();
 	for (r = 0; r < VELLUM_REQ_MAX; r++) {
 		VellumListReq *req = &g_reqs[r];
 		SteamServerListResponse *cb;
 		if (!req->used || req->notified || req->cb == NULL) {
 			continue;
 		}
+		if (req->ping_done < req->count) {
+			continue;
+		}
 		cb = (SteamServerListResponse *)req->cb;
 		req->notified = 1;
-		for (i = 0; i < req->count; i++) {
-			cb->ServerResponded((HServerListRequest)req, i);
-		}
 		cb->RefreshComplete((HServerListRequest)req, req->count ? 0 : 2);
 		Vellum_Log("ListNotify count=%d", req->count);
 	}
