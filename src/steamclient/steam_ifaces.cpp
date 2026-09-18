@@ -29,6 +29,9 @@
 
 void Vellum_Log(const char *fmt, ...)
 {
+#ifdef NDEBUG
+	(void)fmt;
+#else
 	char dir[MAX_PATH];
 	char path[MAX_PATH];
 	char line[1024];
@@ -61,6 +64,7 @@ void Vellum_Log(const char *fmt, ...)
 	fputs(line, f);
 	fputc('\n', f);
 	fclose(f);
+#endif
 }
 
 #ifdef _WIN32

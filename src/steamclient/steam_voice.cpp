@@ -7,7 +7,11 @@
 #include <string.h>
 #include <math.h>
 
+#ifdef _WIN32
+#include <opus.h>
+#else
 #include <opus/opus.h>
+#endif
 
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
