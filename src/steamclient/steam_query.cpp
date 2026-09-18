@@ -1263,10 +1263,43 @@ static int Vellum_CountSub(const char *s, const char *sub)
 	return n;
 }
 
-static int Vellum_HttpListParse(const char *json, VellumHttpList *h)
+/* Optional JSON field. Missing / unknown => keep. Only explicit false/0 is offline. */
+static int Vellum_JsonStatusOffline(const char *json, const char *ipkey)
+{
+	const char *obj = ipkey;
+	const char *end;
+	const char *s;
+	if (json == NULL || ipkey == NULL || ipkey < json) {
+		return 0;
+	}
+	while (obj > json && *obj != '{') {
+		obj--;
+	}
+	end = strchr(obj, '}');
+	s = strstr(obj, "\"status\":");
+	if (s == NULL || (end != NULL && s > end)) {
+		return 0;
+	}
+	s += 9;
+	while (*s == ' ' || *s == '\t') {
+		s++;
+	}
+	if (end != NULL && s >= end) {
+		return 0;
+	}
+	if (*s == '0' && (s[1] < '0' || s[1] > '9')) {
+		return 1;
+	}
+	return Vellum_StrNicmp(s, "false", 5) == 0;
+}
+
+static int Vellum_HttpListParse(const char *json, VellumHttpList *h, int *offline)
 {
 	const char *p = json;
 	int added = 0;
+	if (offline) {
+		*offline = 0;
+	}
 	if (json == NULL) {
 		return 0;
 	}
@@ -1276,6 +1309,13 @@ static int Vellum_HttpListParse(const char *json, VellumHttpList *h)
 		int n = 0;
 		uint32 ip = 0;
 		unsigned port = 0;
+		if (Vellum_JsonStatusOffline(json, p)) {
+			if (offline) {
+				(*offline)++;
+			}
+			p += 6;
+			continue;
+		}
 		p += 6;
 		while (*p && *p != '"' && n < (int)sizeof(ipstr) - 1) {
 			ipstr[n++] = *p++;
@@ -1299,6 +1339,27 @@ static int Vellum_HttpListParse(const char *json, VellumHttpList *h)
 		added++;
 	}
 	return added;
+}
+
+static int Vellum_HttpListPageSize(const char *url)
+{
+	const char *s;
+	int n;
+	if (url == NULL) {
+		return 0;
+	}
+	s = strstr(url, "limit=");
+	if (s == NULL) {
+		return 0;
+	}
+	n = atoi(s + 6);
+	if (n < 1) {
+		return 0;
+	}
+	if (n > 1000) {
+		n = 1000;
+	}
+	return n;
 }
 
 static void Vellum_HttpListMakeUrl(char *out, int outn, const char *tmpl, int offset)
@@ -1330,13 +1391,18 @@ static void *Vellum_HttpListWorker(void *param)
 	VellumHttpList *h = (VellumHttpList *)param;
 	int offset;
 	int added_total = 0;
+	int step = Vellum_HttpListPageSize(h->url);
+	int stride = step > 0 ? step : 100;
 	int paged = strstr(h->url, "{offset}") != NULL;
-	for (offset = 0; offset < 100000 && !h->abort; offset += 100) {
+	for (offset = 0; offset < 100000 && !h->abort; offset += stride) {
 		char url[768];
 		char *body = NULL;
 		int n = 0;
 		int added;
-		int page_items;
+		int offline = 0;
+		int n_ip;
+		int n_conn;
+		int page_n;
 		Vellum_HttpListMakeUrl(url, (int)sizeof(url), h->url, offset);
 		if (!Vellum_HttpListFetch(h, url, &body, &n) || body == NULL) {
 			Vellum_HttpListAbortNet(h);
@@ -1345,14 +1411,20 @@ static void *Vellum_HttpListWorker(void *param)
 				break;
 			}
 		}
-		page_items = Vellum_CountSub(body, "\"connect\"");
-		added = Vellum_HttpListParse(body, h);
+		n_ip = Vellum_CountSub(body, "\"ip\":\"");
+		n_conn = Vellum_CountSub(body, "\"connect\"");
+		page_n = n_ip > n_conn ? n_ip : n_conn;
+		added = Vellum_HttpListParse(body, h, &offline);
 		free(body);
 		added_total += added;
-		if (offset == 0 || page_items < 100 || (offset % 1000) == 0) {
-			Vellum_Log("HttpList page offset=%d json=%d parsed=%d total=%d", offset, page_items, added, h->n);
+		if (offset == 0 || page_n == 0 || (step > 0 && page_n < step) || (offset % 1000) == 0) {
+			Vellum_Log("HttpList page offset=%d json=%d parsed=%d offline=%d total=%d step=%d",
+			           offset, page_n, added, offline, h->n, step);
 		}
-		if (!paged || page_items < 100) {
+		if (!paged || page_n == 0 || (step > 0 && page_n < step)) {
+			break;
+		}
+		if (offline > 0 && added == 0) {
 			break;
 		}
 	}
