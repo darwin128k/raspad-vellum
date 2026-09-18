@@ -91,6 +91,11 @@ static OpusEncoder *g_enc;
 static uint16 g_seq;
 static uint64 g_sid;
 static RxSlot g_rx[MAX_RX_SLOTS];
+static unsigned g_tx_pkts;
+static unsigned g_tx_bytes;
+static unsigned g_rx_pkts;
+static unsigned g_rx_bytes;
+static unsigned g_voice_log_ms;
 
 static unsigned Vellum_VoiceNow()
 {
@@ -101,6 +106,23 @@ static unsigned Vellum_VoiceNow()
 	clock_gettime(CLOCK_MONOTONIC, &ts);
 	return (unsigned)(ts.tv_sec * 1000u + ts.tv_nsec / 1000000u);
 #endif
+}
+
+static void VoiceNote(const char *dir, unsigned n)
+{
+	unsigned now;
+	if (dir != NULL && dir[0] == 't') {
+		g_tx_pkts++;
+		g_tx_bytes += n;
+	} else {
+		g_rx_pkts++;
+		g_rx_bytes += n;
+	}
+	now = Vellum_VoiceNow();
+	if (g_tx_pkts + g_rx_pkts == 1 || now - g_voice_log_ms >= 1000u) {
+		g_voice_log_ms = now;
+		Vellum_Log("voice %s last=%u tx=%u/%u rx=%u/%u", dir, n, g_tx_pkts, g_tx_bytes, g_rx_pkts, g_rx_bytes);
+	}
 }
 
 static void EnsureLock()
@@ -199,7 +221,7 @@ static int EnsureEncoder()
 	}
 	g_enc = opus_encoder_create(GS_RATE, 1, OPUS_APPLICATION_VOIP, &err);
 	if (g_enc == NULL || err != OPUS_OK) {
-		Vellum_Log("Voice encoder fail err=%d", err);
+		Vellum_Log("voice encoder fail err=%d", err);
 		g_enc = NULL;
 		return 0;
 	}
@@ -344,7 +366,7 @@ static int OpenMic()
 	wfx.nAvgBytesPerSec = CAP_RATE * 2;
 	mm = waveInOpen(&g_hwi, WAVE_MAPPER, &wfx, (DWORD_PTR)Vellum_WaveInProc, 0, CALLBACK_FUNCTION);
 	if (mm != MMSYSERR_NOERROR) {
-		Vellum_Log("Voice waveInOpen mm=%u", (unsigned)mm);
+		Vellum_Log("voice waveInOpen mm=%u", (unsigned)mm);
 		g_hwi = NULL;
 		return 0;
 	}
@@ -357,10 +379,11 @@ static int OpenMic()
 	}
 	mm = waveInStart(g_hwi);
 	if (mm != MMSYSERR_NOERROR) {
-		Vellum_Log("Voice waveInStart mm=%u", (unsigned)mm);
+		Vellum_Log("voice waveInStart mm=%u", (unsigned)mm);
 		CloseMic();
 		return 0;
 	}
+	Vellum_Log("voice mic open rate=%u", (unsigned)CAP_RATE);
 	return 1;
 }
 #else
@@ -422,7 +445,7 @@ static int OpenMic()
 	}
 	err = snd_pcm_open(&g_capture, "default", SND_PCM_STREAM_CAPTURE, 0);
 	if (err < 0) {
-		Vellum_Log("Voice alsa open: %s", snd_strerror(err));
+		Vellum_Log("voice alsa open: %s", snd_strerror(err));
 		g_capture = NULL;
 		return 0;
 	}
@@ -436,20 +459,20 @@ static int OpenMic()
 	err = snd_pcm_hw_params(g_capture, hw);
 	snd_pcm_hw_params_free(hw);
 	if (err < 0) {
-		Vellum_Log("Voice alsa hw: %s", snd_strerror(err));
+		Vellum_Log("voice alsa hw: %s", snd_strerror(err));
 		snd_pcm_close(g_capture);
 		g_capture = NULL;
 		return 0;
 	}
 	snd_pcm_prepare(g_capture);
 	if (pthread_create(&g_cap_thread, NULL, Vellum_CaptureThread, NULL) != 0) {
-		Vellum_Log("Voice capture thread fail");
+		Vellum_Log("voice capture thread fail");
 		snd_pcm_close(g_capture);
 		g_capture = NULL;
 		return 0;
 	}
 	g_cap_thread_ready = 1;
-	Vellum_Log("Voice alsa rate=%u period=%u", rate, (unsigned)period);
+	Vellum_Log("voice alsa rate=%u period=%u", rate, (unsigned)period);
 	return 1;
 }
 #endif
@@ -656,7 +679,7 @@ static int DecodeSteamPayload(const unsigned char *comp, unsigned compBytes, sho
 	}
 	if (!SteamVoiceCrcOk(comp, compBytes)) {
 		if (s_fail_logs < 8) {
-			Vellum_Log("Voice decompress CRC fail n=%u", compBytes);
+			Vellum_Log("voice decompress CRC fail n=%u", compBytes);
 			s_fail_logs++;
 		}
 		return -1;
@@ -692,7 +715,7 @@ static int DecodeSteamPayload(const unsigned char *comp, unsigned compBytes, sho
 			int got;
 			if (off + val > end) {
 				if (s_fail_logs < 8) {
-					Vellum_Log("Voice decompress truncated type=%u len=%u", type, val);
+					Vellum_Log("voice decompress truncated type=%u len=%u", type, val);
 					s_fail_logs++;
 				}
 				break;
@@ -713,7 +736,7 @@ static int DecodeSteamPayload(const unsigned char *comp, unsigned compBytes, sho
 			continue;
 		}
 		if (s_fail_logs < 8) {
-			Vellum_Log("Voice decompress unknown type=%u val=%u off=%u n=%u", type, val, off, compBytes);
+			Vellum_Log("voice decompress unknown type=%u val=%u off=%u n=%u", type, val, off, compBytes);
 			s_fail_logs++;
 		}
 		break;
@@ -754,7 +777,12 @@ void Vellum_VoiceStart()
 		VoiceUnlock();
 		return;
 	}
-	Vellum_Log("Voice start sid=%llu", (unsigned long long)g_sid);
+	g_tx_pkts = 0;
+	g_tx_bytes = 0;
+	g_rx_pkts = 0;
+	g_rx_bytes = 0;
+	g_voice_log_ms = 0;
+	Vellum_Log("voice start sid=%llu", (unsigned long long)g_sid);
 }
 
 void Vellum_VoiceStop()
@@ -771,7 +799,7 @@ void Vellum_VoiceStop()
 	}
 	VoiceUnlock();
 	CloseMic();
-	Vellum_Log("Voice stop");
+	Vellum_Log("voice stop tx=%u/%u rx=%u/%u", g_tx_pkts, g_tx_bytes, g_rx_pkts, g_rx_bytes);
 }
 
 int Vellum_VoiceAvailable(uint32 *pcbCompressed, uint32 *pcbUncompressed, uint32 wantRate)
@@ -805,6 +833,7 @@ int Vellum_VoiceGet(bool wantCompressed, void *dst, uint32 dstBytes, uint32 *wro
                     bool wantUncompressed, void *udst, uint32 udstBytes, uint32 *uwrote, uint32 wantRate)
 {
 	int rc = kVoiceNoData;
+	uint32 nTx = 0;
 	if (wrote) *wrote = 0;
 	if (uwrote) *uwrote = 0;
 	EnsureLock();
@@ -824,6 +853,7 @@ int Vellum_VoiceGet(bool wantCompressed, void *dst, uint32 dstBytes, uint32 *wro
 			return kVoiceBufferTooSmall;
 		}
 		memcpy(dst, g_pkt, g_pktLen);
+		nTx = g_pktLen;
 		if (wrote) *wrote = g_pktLen;
 		g_pktLen = 0;
 		rc = kVoiceOk;
@@ -837,6 +867,9 @@ int Vellum_VoiceGet(bool wantCompressed, void *dst, uint32 dstBytes, uint32 *wro
 		}
 	}
 	VoiceUnlock();
+	if (nTx > 0) {
+		VoiceNote("tx", nTx);
+	}
 	return rc;
 }
 
@@ -875,6 +908,9 @@ int Vellum_VoiceDecompress(const void *comp, uint32 compBytes, void *dst, uint32
 	}
 	nOut = Resample(pcm, nPcm, srcRate, (short *)dst, maxOut, wantRate);
 	if (wrote) *wrote = (uint32)nOut * 2u;
+	if (nOut > 0) {
+		VoiceNote("rx", (unsigned)nOut * 2u);
+	}
 	return kVoiceOk;
 }
 

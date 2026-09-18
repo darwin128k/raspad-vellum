@@ -16,6 +16,7 @@
 #else
 #include <strings.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <unistd.h>
 #ifndef MAX_PATH
 #define MAX_PATH 4096
@@ -34,12 +35,19 @@ void Vellum_Log(const char *fmt, ...)
 #else
 	char dir[MAX_PATH];
 	char path[MAX_PATH];
+	char stamp[32];
 	char line[1024];
 	va_list ap;
 	FILE *f;
+	static int once;
 #ifdef _WIN32
+	SYSTEMTIME st;
 	HMODULE mod = NULL;
 	char *slash;
+	GetLocalTime(&st);
+	_snprintf(stamp, sizeof(stamp), "%02u:%02u:%02u.%03u ",
+	          (unsigned)st.wHour, (unsigned)st.wMinute, (unsigned)st.wSecond,
+	          (unsigned)st.wMilliseconds);
 	GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
 	                   (LPCSTR)&Vellum_Log, &mod);
 	GetModuleFileNameA(mod, dir, MAX_PATH);
@@ -50,9 +58,16 @@ void Vellum_Log(const char *fmt, ...)
 	}
 	_snprintf(path, sizeof(path), "%svellum.log", dir);
 #else
+	struct timeval tv;
+	struct tm tm;
+	gettimeofday(&tv, NULL);
+	localtime_r(&tv.tv_sec, &tm);
+	snprintf(stamp, sizeof(stamp), "%02d:%02d:%02d.%03d ",
+	         tm.tm_hour, tm.tm_min, tm.tm_sec, (int)(tv.tv_usec / 1000));
 	strncpy(path, "vellum.log", sizeof(path) - 1);
 	path[sizeof(path) - 1] = '\0';
 #endif
+	stamp[sizeof(stamp) - 1] = '\0';
 	va_start(ap, fmt);
 	vsnprintf(line, sizeof(line), fmt, ap);
 	va_end(ap);
@@ -61,10 +76,38 @@ void Vellum_Log(const char *fmt, ...)
 	if (f == NULL) {
 		return;
 	}
+	if (!once) {
+		once = 1;
+		fputs(stamp, f);
+		fputs("vellum debug session\n", f);
+	}
+	fputs(stamp, f);
 	fputs(line, f);
 	fputc('\n', f);
 	fclose(f);
 #endif
+}
+
+static int Vellum_LogKeySeen(const char *key)
+{
+	static char keys[96][80];
+	static int n;
+	int i;
+	if (key == NULL || key[0] == '\0') {
+		return 1;
+	}
+	for (i = 0; i < n; i++) {
+		if (strcmp(keys[i], key) == 0) {
+			return 1;
+		}
+	}
+	if (n >= 96) {
+		return 1;
+	}
+	strncpy(keys[n], key, sizeof(keys[n]) - 1);
+	keys[n][sizeof(keys[n]) - 1] = '\0';
+	n++;
+	return 0;
 }
 
 #ifdef _WIN32
@@ -116,9 +159,10 @@ public:
 	virtual int InitiateGameConnection(void *pAuthBlob, int cbMaxAuthBlob, CSteamID, uint32 ip, uint16 port, bool)
 	{
 		int n;
-		Vellum_Log("InitiateGameConnection max=%d ip=%u port=%u", cbMaxAuthBlob, ip, (unsigned)port);
+		Vellum_Log("auth InitiateGameConnection max=%d ip=%u port=%u", cbMaxAuthBlob, ip, (unsigned)port);
 		n = Vellum_WriteAuthBlob(pAuthBlob, cbMaxAuthBlob);
-		Vellum_Log("InitiateGameConnection wrote=%d", n);
+		Vellum_Log("auth connect wrote=%d ip=%u port=%u account=%u", n, ip, (unsigned)port,
+		           (unsigned)Vellum_GetIdentity().account_id);
 		return n;
 	}
 	virtual void TerminateGameConnection(uint32, uint16) {}
@@ -149,7 +193,7 @@ public:
 	virtual uint32 GetVoiceOptimalSampleRate() { return Vellum_VoiceOptimalRate(); }
 	virtual HAuthTicket GetAuthSessionTicket(void *pTicket, int cbMaxTicket, uint32 *pcbTicket)
 	{
-		Vellum_Log("GetAuthSessionTicket max=%d", cbMaxTicket);
+		Vellum_Log("auth GetAuthSessionTicket max=%d", cbMaxTicket);
 		return Vellum_FillAuthTicket(pTicket, cbMaxTicket, pcbTicket) ? 1 : 0;
 	}
 	virtual int BeginAuthSession(const void *, int, CSteamID) { return 0; }
@@ -177,9 +221,10 @@ public:
 	virtual int InitiateGameConnection_DEPRECATED(void *pAuthBlob, int cbMaxAuthBlob, CSteamID, uint32 ip, uint16 port, bool)
 	{
 		int n;
-		Vellum_Log("InitiateGameConnection_DEPRECATED max=%d ip=%u port=%u", cbMaxAuthBlob, ip, (unsigned)port);
+		Vellum_Log("auth InitiateGameConnection_DEPRECATED max=%d ip=%u port=%u", cbMaxAuthBlob, ip, (unsigned)port);
 		n = Vellum_WriteAuthBlob(pAuthBlob, cbMaxAuthBlob);
-		Vellum_Log("InitiateGameConnection_DEPRECATED wrote=%d", n);
+		Vellum_Log("auth connect(depr) wrote=%d ip=%u port=%u account=%u", n, ip, (unsigned)port,
+		           (unsigned)Vellum_GetIdentity().account_id);
 		return n;
 	}
 	virtual void TerminateGameConnection_DEPRECATED(uint32, uint16) {}
@@ -210,7 +255,7 @@ public:
 	virtual uint32 GetVoiceOptimalSampleRate() { return Vellum_VoiceOptimalRate(); }
 	virtual HAuthTicket GetAuthSessionTicket(void *pTicket, int cbMaxTicket, uint32 *pcbTicket, const void *)
 	{
-		Vellum_Log("GetAuthSessionTicket021 max=%d", cbMaxTicket);
+		Vellum_Log("auth GetAuthSessionTicket021 max=%d", cbMaxTicket);
 		return Vellum_FillAuthTicket(pTicket, cbMaxTicket, pcbTicket) ? 1 : 0;
 	}
 	virtual HAuthTicket GetAuthTicketForWebApi(const char *) { return 0; }
@@ -979,7 +1024,9 @@ static SteamUnifiedMessages g_unified;
 
 static void *Vellum_PickUser(const char *ver)
 {
-	Vellum_Log("GetISteamUser %s", ver ? ver : "(null)");
+	if (!Vellum_LogKeySeen(ver ? ver : "(null)")) {
+		Vellum_Log("iface user %s", ver ? ver : "(null)");
+	}
 	if (ver != NULL && (strstr(ver, "021") || strstr(ver, "022") || strstr(ver, "023") || strstr(ver, "024"))) {
 		return &g_user023;
 	}
@@ -988,7 +1035,9 @@ static void *Vellum_PickUser(const char *ver)
 
 static void *Vellum_PickFriends(const char *ver)
 {
-	Vellum_Log("GetISteamFriends %s", ver ? ver : "(null)");
+	if (!Vellum_LogKeySeen(ver ? ver : "friends")) {
+		Vellum_Log("iface friends %s", ver ? ver : "(null)");
+	}
 	if (ver != NULL && (strstr(ver, "016") || strstr(ver, "017") || strstr(ver, "018"))) {
 		return &g_friends017;
 	}
@@ -1066,7 +1115,7 @@ static int Vellum_FillAuthTicket(void *pTicket, int cbMaxTicket, uint32 *pcbTick
 	if (pcbTicket) {
 		*pcbTicket = (uint32)n;
 	}
-	Vellum_Log("FillAuthTicket wrote=%d", n);
+	Vellum_Log("auth FillAuthTicket wrote=%d account=%u", n, (unsigned)Vellum_GetIdentity().account_id);
 	if (n <= 0) {
 		return 0;
 	}
@@ -1328,6 +1377,7 @@ static void Vellum_FavLoad()
 #endif
 	path[sizeof(path) - 1] = '\0';
 	Vellum_FavLoadFile(path);
+	Vellum_Log("fav loaded n=%d", g_fav_n);
 }
 
 static void Vellum_FavWriteSection(FILE *f, const char *name, uint32 flag)
@@ -1482,6 +1532,7 @@ static void Vellum_MasterLoad()
 {
 	char path[512];
 	FILE *probe;
+	int i;
 	if (g_master_loaded) {
 		return;
 	}
@@ -1496,7 +1547,10 @@ static void Vellum_MasterLoad()
 		Vellum_MasterWriteDefault(path);
 		Vellum_MasterAddAddr(VELLUM_MASTER_DEFAULT_URL);
 	}
-	Vellum_Log("Master loaded n=%d", g_master_n);
+	Vellum_Log("master file %s n=%d", path, g_master_n);
+	for (i = 0; i < g_master_n; i++) {
+		Vellum_Log("master [%d] %s", i + 1, g_master_addrs[i]);
+	}
 }
 
 static int Vellum_FavFind(AppId_t app, uint32 ip, uint16 conn, uint16 query)
@@ -1819,8 +1873,8 @@ static HServerListRequest Vellum_ListRequestInternet(AppId_t app, void **filters
 	req->app = app ? app : 10;
 	Vellum_BuildMasterFilter(req->filter, sizeof(req->filter), req->app, filters, nfilters, spectator);
 	Vellum_StartInternetMasters(req);
-	Vellum_Log("ListInternet app=%u spec=%d filter=%s masters=%d cb=%p",
-	           (unsigned)req->app, spectator, req->filter, req->master_pending, cb);
+	Vellum_Log("list internet app=%u spec=%d masters=%d filter=%s",
+	           (unsigned)req->app, spectator, req->master_pending, req->filter);
 	return (HServerListRequest)req;
 }
 
@@ -1832,7 +1886,7 @@ static HServerListRequest Vellum_ListRequestLan(AppId_t app, void *cb)
 	if (!Vellum_LanStart(Vellum_OnMaster, req)) {
 		req->master_done = 1;
 	}
-	Vellum_Log("ListLAN app=%u cb=%p", (unsigned)req->app, cb);
+	Vellum_Log("list lan app=%u", (unsigned)req->app);
 	return (HServerListRequest)req;
 }
 
@@ -2024,7 +2078,7 @@ static void Vellum_FlushListCallbacks()
 		cb = (SteamServerListResponse *)req->cb;
 		req->notified = 1;
 		cb->RefreshComplete((HServerListRequest)req, req->count ? 0 : 2);
-		Vellum_Log("ListNotify count=%d", req->count);
+		Vellum_Log("list done kind=%d count=%d pings=%d", req->kind, req->count, req->ping_done);
 	}
 }
 
@@ -2170,7 +2224,13 @@ static SteamGameServerStats g_gsstats;
 
 class SteamClient {
 public:
-	virtual HSteamPipe CreateSteamPipe() { return 1; }
+	virtual HSteamPipe CreateSteamPipe()
+	{
+		if (!Vellum_LogKeySeen("CreateSteamPipe")) {
+			Vellum_Log("iface CreateSteamPipe");
+		}
+		return 1;
+	}
 	virtual bool BReleaseSteamPipe(HSteamPipe) { return true; }
 	virtual HSteamUser ConnectToGlobalUser(HSteamPipe) { return 1; }
 	virtual HSteamUser CreateLocalUser(HSteamPipe *phSteamPipe, int)
@@ -2219,7 +2279,13 @@ public:
 
 class SteamClient020 {
 public:
-	virtual HSteamPipe CreateSteamPipe() { return 1; }
+	virtual HSteamPipe CreateSteamPipe()
+	{
+		if (!Vellum_LogKeySeen("CreateSteamPipe")) {
+			Vellum_Log("iface CreateSteamPipe");
+		}
+		return 1;
+	}
 	virtual bool BReleaseSteamPipe(HSteamPipe) { return true; }
 	virtual HSteamUser ConnectToGlobalUser(HSteamPipe) { return 1; }
 	virtual HSteamUser CreateLocalUser(HSteamPipe *phSteamPipe, int)
@@ -2230,7 +2296,9 @@ public:
 	virtual void ReleaseUser(HSteamPipe, HSteamUser) {}
 	virtual void *GetISteamUser(HSteamUser, HSteamPipe, const char *ver)
 	{
-		Vellum_Log("GetISteamUser020 %s", ver ? ver : "(null)");
+		if (!Vellum_LogKeySeen(ver ? ver : "SteamUser020")) {
+			Vellum_Log("iface user %s", ver ? ver : "(null)");
+		}
 		return &g_user023;
 	}
 	virtual void *GetISteamGameServer(HSteamUser, HSteamPipe, const char *) { return &g_gameserver; }
@@ -2276,7 +2344,9 @@ void *SteamClient::GetISteamGenericInterface(HSteamUser user, HSteamPipe pipe, c
 	if (ver == NULL) {
 		return NULL;
 	}
-	Vellum_Log("GenericInterface %s", ver);
+	if (!Vellum_LogKeySeen(ver)) {
+		Vellum_Log("iface generic %s", ver);
+	}
 	if (strncmp(ver, "SteamUser", 9) == 0) return GetISteamUser(user, pipe, ver);
 	if (strncmp(ver, "SteamFriends", 12) == 0) return GetISteamFriends(user, pipe, ver);
 	if (strncmp(ver, "SteamUtils", 10) == 0) return GetISteamUtils(pipe, ver);
@@ -2304,7 +2374,9 @@ void *SteamClient020::GetISteamGenericInterface(HSteamUser user, HSteamPipe pipe
 	if (strncmp(ver, "SteamController", 15) == 0 || strncmp(ver, "SteamInput", 10) == 0) {
 		return NULL;
 	}
-	Vellum_Log("GenericInterface020 %s", ver);
+	if (!Vellum_LogKeySeen(ver)) {
+		Vellum_Log("iface generic %s", ver);
+	}
 	if (strncmp(ver, "SteamUser", 9) == 0) return GetISteamUser(user, pipe, ver);
 	if (strncmp(ver, "SteamFriends", 12) == 0) return GetISteamFriends(user, pipe, ver);
 	if (strncmp(ver, "SteamUtils", 10) == 0) return GetISteamUtils(pipe, ver);
@@ -2330,39 +2402,37 @@ static SteamClient020 g_client020;
 
 STEAM_EXPORT void *STEAM_CALL CreateInterface(const char *pName, int *pReturnCode)
 {
+	void *ret = NULL;
 	Vellum_InitIdentity();
 	Vellum_InstallCrashLog();
-	Vellum_Log("CreateInterface %s", pName ? pName : "(null)");
 	if (pName != NULL && (strcmp(pName, "SteamClient012") == 0 || strcmp(pName, "SteamClient011") == 0)) {
 		if (pReturnCode) *pReturnCode = 0;
-		return &g_client;
-	}
-	if (pName != NULL && strcmp(pName, "SteamClient017") == 0) {
+		ret = &g_client;
+	} else if (pName != NULL && strcmp(pName, "SteamClient017") == 0) {
 		if (pReturnCode) *pReturnCode = 0;
-		return &g_client017;
-	}
-	if (pName != NULL && strcmp(pName, "SteamClient020") == 0) {
+		ret = &g_client017;
+	} else if (pName != NULL && strcmp(pName, "SteamClient020") == 0) {
 		if (pReturnCode) *pReturnCode = 0;
-		return &g_client020;
-	}
-	if (pName != NULL && (strcmp(pName, "SteamGameServer014") == 0 || strcmp(pName, "SteamGameServer015") == 0)) {
+		ret = &g_client020;
+	} else if (pName != NULL && (strcmp(pName, "SteamGameServer014") == 0 || strcmp(pName, "SteamGameServer015") == 0)) {
 		if (pReturnCode) *pReturnCode = 0;
-		return &g_gameserver;
-	}
-	if (pName != NULL && strcmp(pName, "SteamGameServerStats001") == 0) {
+		ret = &g_gameserver;
+	} else if (pName != NULL && strcmp(pName, "SteamGameServerStats001") == 0) {
 		if (pReturnCode) *pReturnCode = 0;
-		return &g_gsstats;
-	}
-	if (pName != NULL && strncmp(pName, "SteamNetworkingSockets", 22) == 0) {
+		ret = &g_gsstats;
+	} else if (pName != NULL && strncmp(pName, "SteamNetworkingSockets", 22) == 0) {
 		if (pReturnCode) *pReturnCode = 0;
-		return &g_netsockets;
-	}
-	if (pName != NULL && strncmp(pName, "SteamNetworkingUtils", 20) == 0) {
+		ret = &g_netsockets;
+	} else if (pName != NULL && strncmp(pName, "SteamNetworkingUtils", 20) == 0) {
 		if (pReturnCode) *pReturnCode = 0;
-		return &g_netutils;
+		ret = &g_netutils;
+	} else {
+		if (pReturnCode) *pReturnCode = 1;
 	}
-	if (pReturnCode) *pReturnCode = 1;
-	return NULL;
+	if (!Vellum_LogKeySeen(pName ? pName : "(null)")) {
+		Vellum_Log("iface create %s -> %s", pName ? pName : "(null)", ret ? "ok" : "missing");
+	}
+	return ret;
 }
 
 STEAM_EXPORT void *STEAM_CALL SteamInternal_CreateInterface(const char *pName)
@@ -2384,7 +2454,6 @@ STEAM_EXPORT bool STEAM_CALL Steam_BGetCallback(HSteamPipe, CallbackMsg_t *pCall
 	pCallback->m_iCallback = g_cb_last.id;
 	pCallback->m_pubParam = g_cb_last.data;
 	pCallback->m_cubParam = g_cb_last.size;
-	Vellum_Log("BGetCallback id=%d size=%d", g_cb_last.id, g_cb_last.size);
 	return true;
 }
 

@@ -11,10 +11,21 @@ if errorlevel 1 (
 
 set STANDALONE=OFF
 set METAHHOOK=OFF
+set BUILD_TYPE=Release
 set "HL_DIR="
 
 :parse_args
 if "%~1"=="" goto args_done
+if /I "%~1"=="debug" (
+    set BUILD_TYPE=Debug
+    shift
+    goto parse_args
+)
+if /I "%~1"=="release" (
+    set BUILD_TYPE=Release
+    shift
+    goto parse_args
+)
 if /I "%~1"=="standalone" (
     set STANDALONE=ON
     shift
@@ -54,9 +65,9 @@ if not exist build mkdir build
 cd build
 
 if "%STANDALONE%"=="ON" (
-    cmake -G "Ninja" -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=cl -DREVLOADER_STANDALONE=ON -DHL_METAHHOOK=%METAHHOOK% -DHL_DIR="%HL_DIR%" ..
+    cmake -G "Ninja" -DCMAKE_BUILD_TYPE=%BUILD_TYPE% -DCMAKE_CXX_COMPILER=cl -DREVLOADER_STANDALONE=ON -DHL_METAHHOOK=%METAHHOOK% -DHL_DIR="%HL_DIR%" ..
 ) else (
-    cmake -G "Ninja" -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=cl -DREVLOADER_STANDALONE=OFF ..
+    cmake -G "Ninja" -DCMAKE_BUILD_TYPE=%BUILD_TYPE% -DCMAKE_CXX_COMPILER=cl -DREVLOADER_STANDALONE=OFF ..
 )
 if errorlevel 1 (
     echo CMake configure failed
@@ -70,8 +81,8 @@ if errorlevel 1 (
 )
 
 if "%STANDALONE%"=="ON" (
-    echo Build OK: build\cstrike.exe build\steamclient.dll ^(standalone, hl from %HL_DIR%, HL_METAHHOOK=%METAHHOOK%^)
+    echo Build OK: build\cstrike.exe build\steamclient.dll ^(standalone, hl from %HL_DIR%, HL_METAHHOOK=%METAHHOOK%, %BUILD_TYPE%^)
 ) else (
-    echo Build OK: build\cstrike.exe build\steamclient.dll
+    echo Build OK: build\cstrike.exe build\steamclient.dll ^(%BUILD_TYPE%^)
 )
 endlocal

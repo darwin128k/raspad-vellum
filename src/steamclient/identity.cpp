@@ -15,6 +15,8 @@
 #define MAX_PATH 4096
 #endif
 
+void Vellum_Log(const char *fmt, ...);
+
 #ifdef _WIN32
 #define vellum_snprintf _snprintf
 #else
@@ -206,6 +208,9 @@ void Vellum_InitIdentity()
 	g_id.app_id = ReadAppId(dir);
 	g_id.steam_id = CSteamID(g_id.account_id, k_EUniversePublic, k_EAccountTypeIndividual);
 	g_ready = 1;
+	Vellum_Log("ident persona=%s id=%s account=%u app=%u steamid=%llu",
+	           g_id.persona, g_id.ident, (unsigned)g_id.account_id, (unsigned)g_id.app_id,
+	           (unsigned long long)g_id.steam_id.ConvertToUint64());
 }
 
 const VellumIdentity &Vellum_GetIdentity()
