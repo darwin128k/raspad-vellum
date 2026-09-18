@@ -12,7 +12,7 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
-#include <wininet.h>
+#include <winhttp.h>
 #else
 #include <arpa/inet.h>
 #include <errno.h>
@@ -38,7 +38,7 @@ typedef int SOCKET;
 #define Vellum_StrNicmp strncasecmp
 #endif
 
-#define VELLUM_QUERY_MAX 24
+#define VELLUM_QUERY_MAX 48
 #define VELLUM_QUERY_TIMEOUT 3000
 #define VELLUM_MASTER_MAX 8
 #define VELLUM_MASTER_TIMEOUT 4000
@@ -637,6 +637,9 @@ struct VellumHttpList {
 #ifdef _WIN32
 	HANDLE thread;
 	CRITICAL_SECTION lock;
+	HINTERNET ses;
+	HINTERNET con;
+	HINTERNET req;
 #else
 	pthread_t thread;
 	pthread_mutex_t lock;
@@ -922,62 +925,183 @@ static void Vellum_HttpListUnlock(VellumHttpList *h)
 }
 
 #ifdef _WIN32
-static int Vellum_HttpListFetch(const char *url, char **out, int *outn)
+static void Vellum_HttpListAbortNet(VellumHttpList *h)
 {
-	HINTERNET ses;
-	HINTERNET req;
-	char buf[4096];
-	DWORD got;
+	HINTERNET req = NULL;
+	HINTERNET con = NULL;
+	HINTERNET ses = NULL;
+	if (h == NULL) {
+		return;
+	}
+	Vellum_HttpListLock(h);
+	req = h->req;
+	con = h->con;
+	ses = h->ses;
+	h->req = NULL;
+	h->con = NULL;
+	h->ses = NULL;
+	Vellum_HttpListUnlock(h);
+	if (req != NULL) {
+		WinHttpCloseHandle(req);
+	}
+	if (con != NULL) {
+		WinHttpCloseHandle(con);
+	}
+	if (ses != NULL) {
+		WinHttpCloseHandle(ses);
+	}
+}
+
+static void Vellum_HttpListSetNet(VellumHttpList *h, HINTERNET ses, HINTERNET con, HINTERNET req)
+{
+	if (h == NULL) {
+		return;
+	}
+	Vellum_HttpListLock(h);
+	h->ses = ses;
+	h->con = con;
+	h->req = req;
+	Vellum_HttpListUnlock(h);
+}
+#endif
+
+#ifdef _WIN32
+static int Vellum_HttpListFetch(VellumHttpList *h, const char *url, char **out, int *outn)
+{
+	HINTERNET ses = NULL;
+	HINTERNET con = NULL;
+	HINTERNET req = NULL;
+	wchar_t host[256];
+	wchar_t path[768];
+	wchar_t wua[] = L"Valve/Steam HTTP Client 1.0";
+	const char *p;
+	const char *slash;
+	const char *colon;
+	char hosta[256];
+	int https = 0;
+	INTERNET_PORT port = 80;
+	DWORD proto;
+	DWORD n = 0;
+	DWORD cap = 0;
 	char *body = NULL;
-	int n = 0;
-	int cap = 0;
+	size_t hostn;
+	int ok = 0;
+	DWORD ms;
+
 	*out = NULL;
 	*outn = 0;
-	ses = InternetOpenA("VellumServerBrowser/1.0", INTERNET_OPEN_TYPE_PRECONFIG, NULL, NULL, 0);
+	if (url == NULL || url[0] == '\0' || (h != NULL && h->abort)) {
+		return 0;
+	}
+	if (Vellum_StrNicmp(url, "https://", 8) == 0) {
+		https = 1;
+		p = url + 8;
+		port = 443;
+	} else if (Vellum_StrNicmp(url, "http://", 7) == 0) {
+		p = url + 7;
+		port = 80;
+	} else {
+		return 0;
+	}
+	slash = strchr(p, '/');
+	if (slash == NULL) {
+		return 0;
+	}
+	hostn = (size_t)(slash - p);
+	if (hostn == 0 || hostn >= sizeof(hosta)) {
+		return 0;
+	}
+	memcpy(hosta, p, hostn);
+	hosta[hostn] = '\0';
+	colon = strchr(hosta, ':');
+	if (colon != NULL) {
+		port = (INTERNET_PORT)atoi(colon + 1);
+		*(char *)colon = '\0';
+	}
+	if (MultiByteToWideChar(CP_ACP, 0, hosta, -1, host, (int)(sizeof(host) / sizeof(host[0]))) <= 0) {
+		return 0;
+	}
+	if (MultiByteToWideChar(CP_ACP, 0, slash, -1, path, (int)(sizeof(path) / sizeof(path[0]))) <= 0) {
+		return 0;
+	}
+
+	/* NO_PROXY: IE/WPAD autodetection from inside hl.exe can stall WinINet/WinHTTP for seconds. */
+	ses = WinHttpOpen(wua, WINHTTP_ACCESS_TYPE_NO_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
 	if (ses == NULL) {
+		Vellum_Log("HttpList WinHttpOpen err=%u", (unsigned)GetLastError());
 		return 0;
 	}
-	{
-		DWORD flags = INTERNET_FLAG_RELOAD | INTERNET_FLAG_NO_CACHE_WRITE |
-		              INTERNET_FLAG_NO_UI | INTERNET_FLAG_NO_COOKIES;
-		if (Vellum_StrNicmp(url, "https://", 8) == 0) {
-			flags |= INTERNET_FLAG_SECURE;
-		}
-		req = InternetOpenUrlA(ses, url, NULL, 0, flags, 0);
+	Vellum_HttpListSetNet(h, ses, NULL, NULL);
+	proto = 0x00000080u | 0x00000200u | 0x00000800u; /* TLS1 / 1.1 / 1.2 */
+	WinHttpSetOption(ses, WINHTTP_OPTION_SECURE_PROTOCOLS, &proto, sizeof(proto));
+	ms = 5000;
+	WinHttpSetOption(ses, WINHTTP_OPTION_CONNECT_TIMEOUT, &ms, sizeof(ms));
+	WinHttpSetOption(ses, WINHTTP_OPTION_SEND_TIMEOUT, &ms, sizeof(ms));
+	WinHttpSetOption(ses, WINHTTP_OPTION_RECEIVE_TIMEOUT, &ms, sizeof(ms));
+	if (h != NULL && h->abort) {
+		goto done;
 	}
+	con = WinHttpConnect(ses, host, port, 0);
+	if (con == NULL) {
+		Vellum_Log("HttpList WinHttpConnect err=%u host=%s", (unsigned)GetLastError(), hosta);
+		goto done;
+	}
+	Vellum_HttpListSetNet(h, ses, con, NULL);
+	req = WinHttpOpenRequest(con, L"GET", path, NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
+	                         https ? WINHTTP_FLAG_SECURE : 0);
 	if (req == NULL) {
-		InternetCloseHandle(ses);
-		return 0;
+		Vellum_Log("HttpList WinHttpOpenRequest err=%u", (unsigned)GetLastError());
+		goto done;
 	}
-	while (InternetReadFile(req, buf, sizeof(buf), &got) && got > 0) {
-		if (n + (int)got + 1 > cap) {
-			int ncap = cap ? cap * 2 : 65536;
-			char *nb;
-			while (ncap < n + (int)got + 1) {
+	Vellum_HttpListSetNet(h, ses, con, req);
+	if (!WinHttpSendRequest(req, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0) ||
+	    !WinHttpReceiveResponse(req, NULL)) {
+		Vellum_Log("HttpList WinHttp GET err=%u url=%.180s", (unsigned)GetLastError(), url);
+		goto done;
+	}
+	for (;;) {
+		DWORD avail = 0;
+		DWORD got = 0;
+		char *nb;
+		if (h != NULL && h->abort) {
+			break;
+		}
+		if (!WinHttpQueryDataAvailable(req, &avail)) {
+			Vellum_Log("HttpList WinHttp avail err=%u", (unsigned)GetLastError());
+			break;
+		}
+		if (avail == 0) {
+			ok = 1;
+			break;
+		}
+		if (n + avail + 1 > cap) {
+			DWORD ncap = cap ? cap * 2 : 65536;
+			while (ncap < n + avail + 1) {
 				ncap *= 2;
 			}
-			nb = (char *)realloc(body, (size_t)ncap);
+			nb = (char *)realloc(body, ncap);
 			if (nb == NULL) {
-				free(body);
-				InternetCloseHandle(req);
-				InternetCloseHandle(ses);
-				return 0;
+				break;
 			}
 			body = nb;
 			cap = ncap;
 		}
-		memcpy(body + n, buf, got);
-		n += (int)got;
+		if (!WinHttpReadData(req, body + n, avail, &got) || got == 0) {
+			ok = 1;
+			break;
+		}
+		n += got;
 	}
-	InternetCloseHandle(req);
-	InternetCloseHandle(ses);
-	if (body == NULL) {
-		return 0;
+	if (ok && body != NULL) {
+		body[n] = '\0';
+		*out = body;
+		*outn = (int)n;
+		body = NULL;
 	}
-	body[n] = '\0';
-	*out = body;
-	*outn = n;
-	return 1;
+done:
+	Vellum_HttpListAbortNet(h);
+	free(body);
+	return *out != NULL;
 }
 #else
 static int Vellum_HttpListFetch(VellumHttpList *h, const char *url, char **out, int *outn)
@@ -1107,12 +1231,8 @@ static void *Vellum_HttpListWorker(void *param)
 		int n = 0;
 		int added;
 		Vellum_HttpListMakeUrl(url, (int)sizeof(url), h->url, offset);
-#ifdef _WIN32
-		if (!Vellum_HttpListFetch(url, &body, &n) || body == NULL) {
-#else
 		if (!Vellum_HttpListFetch(h, url, &body, &n) || body == NULL) {
-#endif
-			Vellum_Log("HttpList fetch fail offset=%d", offset);
+			Vellum_Log("HttpList fetch fail offset=%d url=%.180s", offset, url);
 			break;
 		}
 		added = Vellum_HttpListParse(body, h);
@@ -1133,19 +1253,8 @@ static void *Vellum_HttpListWorker(void *param)
 #endif
 }
 
-static void Vellum_HttpListClose(VellumHttpList *h)
+static void Vellum_HttpListFinish(VellumHttpList *h)
 {
-	h->abort = 1;
-	if (h->thread_ready) {
-#ifdef _WIN32
-		WaitForSingleObject(h->thread, 8000);
-		CloseHandle(h->thread);
-		h->thread = NULL;
-#else
-		pthread_join(h->thread, NULL);
-#endif
-		h->thread_ready = 0;
-	}
 	if (h->lock_ready) {
 #ifdef _WIN32
 		DeleteCriticalSection(&h->lock);
@@ -1157,6 +1266,37 @@ static void Vellum_HttpListClose(VellumHttpList *h)
 	h->used = 0;
 	h->cb = NULL;
 	h->user = NULL;
+	h->thread_ready = 0;
+#ifdef _WIN32
+	h->thread = NULL;
+	h->ses = NULL;
+	h->con = NULL;
+	h->req = NULL;
+#endif
+}
+
+static void Vellum_HttpListClose(VellumHttpList *h)
+{
+	h->abort = 1;
+	h->cb = NULL;
+	h->user = NULL;
+#ifdef _WIN32
+	Vellum_HttpListAbortNet(h);
+	if (h->thread_ready) {
+		if (WaitForSingleObject(h->thread, 0) != WAIT_OBJECT_0) {
+			return;
+		}
+		CloseHandle(h->thread);
+		h->thread = NULL;
+		h->thread_ready = 0;
+	}
+#else
+	if (h->thread_ready) {
+		pthread_join(h->thread, NULL);
+		h->thread_ready = 0;
+	}
+#endif
+	Vellum_HttpListFinish(h);
 }
 
 static void Vellum_HttpListThink()
@@ -1181,10 +1321,26 @@ static void Vellum_HttpListThink()
 		}
 		done = h->done;
 		Vellum_HttpListUnlock(h);
+#ifdef _WIN32
+		if (!done && h->abort && h->thread_ready &&
+		    WaitForSingleObject(h->thread, 0) == WAIT_OBJECT_0) {
+			done = 1;
+		}
+#endif
 		if (done) {
 			VellumMasterCb cb = h->cb;
 			void *user = h->user;
+#ifdef _WIN32
+			if (h->thread_ready) {
+				WaitForSingleObject(h->thread, 0);
+				CloseHandle(h->thread);
+				h->thread = NULL;
+				h->thread_ready = 0;
+			}
+			Vellum_HttpListFinish(h);
+#else
 			Vellum_HttpListClose(h);
+#endif
 			if (cb != NULL) {
 				cb(user, 0, 0, 1);
 			}

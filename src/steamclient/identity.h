@@ -6,6 +6,7 @@
 struct VellumIdentity {
 	char persona[64];
 	char ident[VELLUM_IDENT_MAX];
+	char auth_key[32];
 	uint16 ident_len;
 	uint32 account_id;
 	uint32 app_id;

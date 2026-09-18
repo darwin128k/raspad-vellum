@@ -20,9 +20,10 @@ if(WIN32)
         steam_query.cpp
         steam_http.cpp
         steam_voice.cpp
+        revemu2013.cpp
         steamclient.def
     )
-    target_link_libraries(steamclient PRIVATE advapi32 ws2_32 wininet winmm opus)
+    target_link_libraries(steamclient PRIVATE advapi32 ws2_32 wininet winhttp winmm opus)
     target_compile_definitions(steamclient PRIVATE _CRT_SECURE_NO_WARNINGS)
 else()
     add_library(steamclient SHARED
@@ -31,6 +32,7 @@ else()
         steam_query.cpp
         steam_http.cpp
         steam_voice.cpp
+        revemu2013.cpp
     )
     target_compile_options(steamclient PRIVATE -fvisibility=hidden)
     target_link_options(steamclient PRIVATE -static-libstdc++ -static-libgcc)
@@ -49,6 +51,11 @@ endif()
 if(VELLUM_NO_SERVER_BROWSER)
     target_compile_definitions(steamclient PRIVATE VELLUM_NO_SERVER_BROWSER)
     message(STATUS "vellum: Internet server browser disabled (no masterserver.vdf)")
+endif()
+
+if(VELLUM_AUTH_REVEMU2013)
+    target_compile_definitions(steamclient PRIVATE VELLUM_AUTH_REVEMU2013)
+    message(STATUS "vellum: connect tickets are RevEmu 2013 (no VLLM)")
 endif()
 
 set_target_properties(steamclient PROPERTIES

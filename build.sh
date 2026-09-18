@@ -10,9 +10,11 @@ rm -f /tmp/vellum-m32-test
 
 STANDALONE=OFF
 HL_DIR=""
+REVEMU2013=OFF
 for arg in "$@"; do
     case "$arg" in
         standalone) STANDALONE=ON ;;
+        revemu2013) REVEMU2013=ON ;;
         metahook|nometahook)
             echo "metahook is Windows-only"
             exit 1
@@ -42,13 +44,13 @@ fi
 mkdir -p build-linux
 cd build-linux
 if [ "$STANDALONE" = ON ]; then
-    cmake -DCMAKE_BUILD_TYPE=Release -DREVLOADER_STANDALONE=ON -DHL_DIR="$HL_DIR" ..
+    cmake -DCMAKE_BUILD_TYPE=Release -DREVLOADER_STANDALONE=ON -DHL_DIR="$HL_DIR" -DVELLUM_AUTH_REVEMU2013=$REVEMU2013 ..
 else
-    cmake -DCMAKE_BUILD_TYPE=Release -DREVLOADER_STANDALONE=OFF ..
+    cmake -DCMAKE_BUILD_TYPE=Release -DREVLOADER_STANDALONE=OFF -DVELLUM_AUTH_REVEMU2013=$REVEMU2013 ..
 fi
 cmake --build .
 if [ "$STANDALONE" = ON ]; then
-    echo "Build OK: build-linux/cstrike_linux build-linux/steamclient.so (standalone, hl from $HL_DIR)"
+    echo "Build OK: build-linux/cstrike_linux build-linux/steamclient.so (standalone, hl from $HL_DIR, REVEMU2013=$REVEMU2013)"
 else
-    echo "Build OK: build-linux/cstrike_linux build-linux/steamclient.so"
+    echo "Build OK: build-linux/cstrike_linux build-linux/steamclient.so (REVEMU2013=$REVEMU2013)"
 fi

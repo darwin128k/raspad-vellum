@@ -4,6 +4,7 @@
 #include "steam_query.h"
 #include "steam_http.h"
 #include "steam_voice.h"
+#include "revemu2013.h"
 
 #include <stdarg.h>
 #include <stdio.h>
@@ -1127,7 +1128,7 @@ static int Vellum_FillAuthTicket(void *pTicket, int cbMaxTicket, uint32 *pcbTick
 
 #define VELLUM_FAV_MAX 64
 #define VELLUM_LIST_MAX 512
-#define VELLUM_REQ_MAX 4
+#define VELLUM_REQ_MAX 16
 
 enum {
 	VELLUM_LIST_FAV = 0,
@@ -1437,16 +1438,21 @@ static void Vellum_FavSave()
 	fclose(f);
 }
 
-static void Vellum_MasterPath(char *path, size_t pathSize)
+static void Vellum_MasterPathNamed(char *path, size_t pathSize, const char *name)
 {
 	char dir[512];
 	Vellum_GameDir(dir, sizeof(dir));
 #ifdef _WIN32
-	_snprintf(path, pathSize, "%sconfig\\masterserver.vdf", dir);
+	_snprintf(path, pathSize, "%sconfig\\%s", dir, name);
 #else
-	snprintf(path, pathSize, "%sconfig/masterserver.vdf", dir);
+	snprintf(path, pathSize, "%sconfig/%s", dir, name);
 #endif
 	path[pathSize - 1] = '\0';
+}
+
+static void Vellum_MasterPath(char *path, size_t pathSize)
+{
+	Vellum_MasterPathNamed(path, pathSize, "masterserver.vdf");
 }
 
 static void Vellum_MasterWriteDefault(const char *path)
@@ -1552,8 +1558,17 @@ static void Vellum_MasterLoad()
 		fclose(probe);
 		Vellum_MasterLoadFile(path);
 	} else {
-		Vellum_MasterWriteDefault(path);
-		Vellum_MasterAddAddr(VELLUM_MASTER_DEFAULT_URL);
+		char oldpath[512];
+		Vellum_MasterPathNamed(oldpath, sizeof(oldpath), "master.vdf");
+		probe = fopen(oldpath, "r");
+		if (probe != NULL) {
+			fclose(probe);
+			Vellum_MasterLoadFile(oldpath);
+			Vellum_Log("master fallback %s", oldpath);
+		} else {
+			Vellum_MasterWriteDefault(path);
+			Vellum_MasterAddAddr(VELLUM_MASTER_DEFAULT_URL);
+		}
 	}
 	Vellum_Log("master file %s n=%d", path, g_master_n);
 	for (i = 0; i < g_master_n; i++) {
@@ -1702,7 +1717,15 @@ static VellumListReq *Vellum_AllocReq(void *response)
 		}
 	}
 	if (req == NULL) {
-		req = &g_reqs[0];
+		for (r = 0; r < VELLUM_REQ_MAX; r++) {
+			if (g_reqs[r].notified || g_reqs[r].cb == NULL) {
+				req = &g_reqs[r];
+				break;
+			}
+		}
+	}
+	if (req == NULL) {
+		req = &g_reqs[VELLUM_REQ_MAX - 1];
 	}
 	Vellum_MasterCancel(req);
 	memset(req, 0, sizeof(*req));
@@ -1741,6 +1764,12 @@ static void Vellum_OnMaster(void *user, uint32 ip, uint16 port, int finished)
 	}
 	Vellum_FillItemAdr(&req->items[req->count], ip, port, req->app);
 	req->count++;
+	{
+		SteamServerListResponse *cb = (SteamServerListResponse *)req->cb;
+		if (cb != NULL) {
+			cb->ServerResponded((HServerListRequest)req, req->count - 1);
+		}
+	}
 }
 
 static void Vellum_AppendFilter(char *out, size_t n, const char *key, const char *val)
@@ -2098,6 +2127,10 @@ static CSteamID Vellum_GameServerSteamId()
 
 static CSteamID Vellum_SteamIdFromAuthBlob(const void *blob, int len)
 {
+	uint32_t acc = 0;
+	if (RevEmu2013_AccountIdFromTicket(blob, len, &acc)) {
+		return CSteamID(acc, k_EUniversePublic, k_EAccountTypeIndividual);
+	}
 	if (blob != NULL && len == (int)sizeof(VellumTicket)) {
 		const VellumTicket *t = (const VellumTicket *)blob;
 		if (Vellum_TicketValid(t, (size_t)len)) {

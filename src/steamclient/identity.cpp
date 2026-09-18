@@ -1,4 +1,5 @@
 #include "identity.h"
+#include "revemu2013.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -95,6 +96,15 @@ static uint32 ReadAppId(const char *dir)
 	return id ? id : 10;
 }
 
+static void FillAuthKey(char *key, size_t keySize, unsigned serial)
+{
+	if (serial == 0) {
+		serial = 1;
+	}
+	vellum_snprintf(key, keySize, "%u", serial);
+	key[keySize - 1] = '\0';
+}
+
 #ifdef _WIN32
 static void FillPersona(char *persona, size_t personaSize)
 {
@@ -105,7 +115,7 @@ static void FillPersona(char *persona, size_t personaSize)
 	}
 }
 
-static void FillIdent(char *ident, size_t identSize, uint16 *ident_len)
+static void FillIdent(char *ident, size_t identSize, uint16 *ident_len, char *auth_key, size_t authSize)
 {
 	char computer[MAX_COMPUTERNAME_LENGTH + 1] = {};
 	DWORD cn = sizeof(computer);
@@ -119,6 +129,7 @@ static void FillIdent(char *ident, size_t identSize, uint16 *ident_len)
 	_snprintf(ident, identSize, "%s-%08X", computer, (unsigned)serial);
 	ident[identSize - 1] = '\0';
 	*ident_len = (uint16)strlen(ident);
+	FillAuthKey(auth_key, authSize, (unsigned)serial);
 }
 #else
 static void FillPersona(char *persona, size_t personaSize)
@@ -173,9 +184,10 @@ static uint32 ReadMachineSerial(void)
 	return digits == 8 && v != 0 ? (uint32)v : 1u;
 }
 
-static void FillIdent(char *ident, size_t identSize, uint16 *ident_len)
+static void FillIdent(char *ident, size_t identSize, uint16 *ident_len, char *auth_key, size_t authSize)
 {
 	char computer[256] = {};
+	unsigned serial;
 	if (gethostname(computer, sizeof(computer) - 1) != 0 || computer[0] == '\0') {
 		strncpy(computer, "PC", sizeof(computer) - 1);
 	}
@@ -185,9 +197,11 @@ static void FillIdent(char *ident, size_t identSize, uint16 *ident_len)
 		computer[32] = '\0';
 	}
 
-	snprintf(ident, identSize, "%s-%08X", computer, (unsigned)ReadMachineSerial());
+	serial = (unsigned)ReadMachineSerial();
+	snprintf(ident, identSize, "%s-%08X", computer, serial);
 	ident[identSize - 1] = '\0';
 	*ident_len = (uint16)strlen(ident);
+	FillAuthKey(auth_key, authSize, serial);
 }
 #endif
 
@@ -202,15 +216,25 @@ void Vellum_InitIdentity()
 	DirFromThisDll(dir, sizeof(dir));
 
 	FillPersona(g_id.persona, sizeof(g_id.persona));
-	FillIdent(g_id.ident, sizeof(g_id.ident), &g_id.ident_len);
+	FillIdent(g_id.ident, sizeof(g_id.ident), &g_id.ident_len, g_id.auth_key, sizeof(g_id.auth_key));
 
+#ifdef VELLUM_AUTH_REVEMU2013
+	g_id.account_id = RevEmu2013_AccountId(g_id.auth_key);
+#else
 	g_id.account_id = Vellum_AccountIdFromIdent(g_id.ident, g_id.ident_len);
+#endif
 	g_id.app_id = ReadAppId(dir);
 	g_id.steam_id = CSteamID(g_id.account_id, k_EUniversePublic, k_EAccountTypeIndividual);
 	g_ready = 1;
-	Vellum_Log("ident persona=%s id=%s account=%u app=%u steamid=%llu",
+#ifdef VELLUM_AUTH_REVEMU2013
+	Vellum_Log("ident kind=revemu2013 persona=%s id=%s authkey=%s account=%u app=%u steamid=%llu",
+	           g_id.persona, g_id.ident, g_id.auth_key, (unsigned)g_id.account_id, (unsigned)g_id.app_id,
+	           (unsigned long long)g_id.steam_id.ConvertToUint64());
+#else
+	Vellum_Log("ident kind=vellum persona=%s id=%s account=%u app=%u steamid=%llu",
 	           g_id.persona, g_id.ident, (unsigned)g_id.account_id, (unsigned)g_id.app_id,
 	           (unsigned long long)g_id.steam_id.ConvertToUint64());
+#endif
 }
 
 const VellumIdentity &Vellum_GetIdentity()
@@ -221,14 +245,18 @@ const VellumIdentity &Vellum_GetIdentity()
 
 int Vellum_WriteAuthBlob(void *blob, int maxBytes)
 {
+	const VellumIdentity &id = Vellum_GetIdentity();
+#ifdef VELLUM_AUTH_REVEMU2013
+	return RevEmu2013_WriteTicket(blob, maxBytes, id.auth_key);
+#else
+	VellumTicket ticket;
 	if (blob == NULL || maxBytes < (int)sizeof(VellumTicket)) {
 		return 0;
 	}
-	const VellumIdentity &id = Vellum_GetIdentity();
-	VellumTicket ticket;
 	if (!Vellum_FillTicket(&ticket, id.ident, id.ident_len)) {
 		return 0;
 	}
 	memcpy(blob, &ticket, sizeof(ticket));
 	return (int)sizeof(ticket);
+#endif
 }

@@ -12,6 +12,7 @@ if errorlevel 1 (
 set STANDALONE=OFF
 set METAHHOOK=OFF
 set BUILD_TYPE=Release
+set REVEMU2013=OFF
 set "HL_DIR="
 
 :parse_args
@@ -41,6 +42,11 @@ if /I "%~1"=="nometahook" (
     shift
     goto parse_args
 )
+if /I "%~1"=="revemu2013" (
+    set REVEMU2013=ON
+    shift
+    goto parse_args
+)
 if "%STANDALONE%"=="ON" if "%HL_DIR%"=="" (
     set "HL_DIR=%~1"
     shift
@@ -65,9 +71,9 @@ if not exist build mkdir build
 cd build
 
 if "%STANDALONE%"=="ON" (
-    cmake -G "Ninja" -DCMAKE_BUILD_TYPE=%BUILD_TYPE% -DCMAKE_CXX_COMPILER=cl -DREVLOADER_STANDALONE=ON -DHL_METAHHOOK=%METAHHOOK% -DHL_DIR="%HL_DIR%" ..
+    cmake -G "Ninja" -DCMAKE_BUILD_TYPE=%BUILD_TYPE% -DCMAKE_CXX_COMPILER=cl -DREVLOADER_STANDALONE=ON -DHL_METAHHOOK=%METAHHOOK% -DHL_DIR="%HL_DIR%" -DVELLUM_AUTH_REVEMU2013=%REVEMU2013% ..
 ) else (
-    cmake -G "Ninja" -DCMAKE_BUILD_TYPE=%BUILD_TYPE% -DCMAKE_CXX_COMPILER=cl -DREVLOADER_STANDALONE=OFF ..
+    cmake -G "Ninja" -DCMAKE_BUILD_TYPE=%BUILD_TYPE% -DCMAKE_CXX_COMPILER=cl -DREVLOADER_STANDALONE=OFF -DVELLUM_AUTH_REVEMU2013=%REVEMU2013% ..
 )
 if errorlevel 1 (
     echo CMake configure failed
@@ -81,8 +87,8 @@ if errorlevel 1 (
 )
 
 if "%STANDALONE%"=="ON" (
-    echo Build OK: build\cstrike.exe build\steamclient.dll ^(standalone, hl from %HL_DIR%, HL_METAHHOOK=%METAHHOOK%, %BUILD_TYPE%^)
+    echo Build OK: build\cstrike.exe build\steamclient.dll ^(standalone, hl from %HL_DIR%, HL_METAHHOOK=%METAHHOOK%, %BUILD_TYPE%, REVEMU2013=%REVEMU2013%^)
 ) else (
-    echo Build OK: build\cstrike.exe build\steamclient.dll ^(%BUILD_TYPE%^)
+    echo Build OK: build\cstrike.exe build\steamclient.dll ^(%BUILD_TYPE%, REVEMU2013=%REVEMU2013%^)
 )
 endlocal

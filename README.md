@@ -16,7 +16,7 @@ The engine, filesystem, and `hw` live in [raspad-hl](https://github.com/darwin12
 ## What steamclient implements
 
 - **SteamClient012 / 017 / 020** — enough of `CreateInterface` for GoldSrc 8684 and Steam Half-Life (Oct 2024 / 10210+).
-- **Auth** — 64-byte Vellum ticket (`VLLM`). qproto classifies it as `CA_VELLUM`, on purpose not RevEmu / SC2009 / OldRevEmu. Servers without Vellum support will reject the ticket.
+- **Auth** — by default a 64-byte Vellum ticket (`VLLM`, `CA_VELLUM`). Optional `-DVELLUM_AUTH_REVEMU2013=ON` emits a RevEmu 2013 blob instead (`CA_REVEMU2013` on Reunion). One or the other, not both.
 - **Identity** — persona is the OS user name. The ticket ident is hostname plus a machine serial (Windows: `COMPUTERNAME` and the C: volume serial; Linux: `gethostname` and `/etc/machine-id`).
 - **Server browser** — favorites/history via `config/serverbrowser.vdf`. Internet lists come from `config/masterserver.vdf` (HTTP JSON catalogs and/or UDP A2M hosts). LAN is UDP broadcast. Game/map/ping are filled with A2S.
 - **HTTP** — real `ISteamHTTP` for FastDL and list fetches (WinINet on Windows, libcurl on Linux).
@@ -120,6 +120,8 @@ One loader instance at a time. Optional `-launch` / `-appid`. Default game is `c
 Release builds write no `vellum.log`. Debug (`build.bat debug`) logs a timestamped session: identity, interfaces, connect ticket, master list, and voice tx/rx.
 
 CMake `-DVELLUM_NO_SERVER_BROWSER=ON` skips `config/masterserver.vdf` so the Internet tab stays empty. Default is **OFF** (search enabled). Favorites and LAN are unchanged. This is for a later one-server build that will not ship a public browser.
+
+CMake `-DVELLUM_AUTH_REVEMU2013=ON` (or `build.bat revemu2013`) sends RevEmu 2013 tickets so Reunion/DProto servers that allow `cid_RevEmu2013` will accept the client. Default is **OFF**: VLLM only, no RevEmu dialect. The two tickets are not mixed in one build.
 
 ## License
 
