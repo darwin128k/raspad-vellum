@@ -26,7 +26,7 @@ The engine, filesystem, and `hw` live in [raspad-hl](https://github.com/darwin12
 
 Written next to the game / `steamclient` binary.
 
-**`config/masterserver.vdf`** — Internet tab sources. Missing file gets a default HTTP catalog. `http://` / `https://` is JSON (`{offset}` for paging). Query parameters belong to that address: GameMonitoring uses `status=1` and optional `country={country}` (filled from the client's IP, then OS locale; drop the placeholder for a world list). JSON `status` / `country` are optional — missing means keep the server. Anything else is a UDP master: hostname or IPv4, optional `:port` (default `27011`). Several entries are queried together; IPs are deduped.
+**`config/masterserver.vdf`** — Internet tab sources. Missing file gets a default HTTP catalog. `http://` / `https://` is JSON (`{offset}` for paging). Query parameters belong to that address: GameMonitoring uses `status=1` and optional `country={country}` (Windows/OS region, not VPN IP; or write `country=RU` yourself). Drop `{country}` for a world list. JSON `status` / `country` are optional — missing means keep the server. Anything else is a UDP master: hostname or IPv4, optional `:port` (default `27011`). Several entries are queried together; IPs are deduped.
 
 ```
 "master"

@@ -1360,8 +1360,6 @@ static void Vellum_StoreCountry(char *out, int outn, const char *cc)
 	out[2] = '\0';
 }
 
-static int Vellum_HttpListFetch(VellumHttpList *h, const char *url, char **out, int *outn);
-
 static void Vellum_CountryFromOs(char *out, int outn)
 {
 #ifdef _WIN32
@@ -1394,43 +1392,13 @@ static void Vellum_CountryFromOs(char *out, int outn)
 #endif
 }
 
-static void Vellum_CountryFromBody(const char *json, char *out, int outn)
-{
-	const char *s;
-	char cc[8];
-	int n = 0;
-	if (json == NULL) {
-		return;
-	}
-	s = strstr(json, "\"countryCode\":\"");
-	if (s != NULL) {
-		s += 15;
-	} else {
-		return;
-	}
-	while (*s && *s != '"' && n < (int)sizeof(cc) - 1) {
-		cc[n++] = *s++;
-	}
-	cc[n] = '\0';
-	Vellum_StoreCountry(out, outn, cc);
-}
-
 static void Vellum_DetectCountry(VellumHttpList *h)
 {
-	char *body = NULL;
-	int n = 0;
 	if (h == NULL) {
 		return;
 	}
 	h->country[0] = '\0';
-	if (Vellum_HttpListFetch(h, "http://ip-api.com/json?fields=countryCode", &body, &n) && body != NULL) {
-		Vellum_CountryFromBody(body, h->country, (int)sizeof(h->country));
-		free(body);
-	}
-	Vellum_HttpListAbortNet(h);
-	if (h->country[0] == '\0') {
-		Vellum_CountryFromOs(h->country, (int)sizeof(h->country));
-	}
+	Vellum_CountryFromOs(h->country, (int)sizeof(h->country));
 	Vellum_Log("HttpList country=%s", h->country[0] ? h->country : "(none)");
 }
 
