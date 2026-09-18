@@ -2,6 +2,7 @@
 #include "identity.h"
 #include "exports.h"
 #include "steam_query.h"
+#include "steam_http.h"
 
 #include <stdarg.h>
 #include <stdio.h>
@@ -24,7 +25,7 @@
  * (build 10211) libsteam_api. Methods the engine needs are real; the rest are
  * no-ops with the correct vtable slots so SteamAPI_Init can obtain every iface. */
 
-static void Vellum_Log(const char *fmt, ...)
+void Vellum_Log(const char *fmt, ...)
 {
 	char dir[MAX_PATH];
 	char path[MAX_PATH];
@@ -95,7 +96,6 @@ static void Vellum_InstallCrashLog(void)
 static void Vellum_InstallCrashLog(void) {}
 #endif
 
-static void Vellum_QueueCallback(HSteamUser user, int id, const void *data, int size);
 static int Vellum_FillAuthTicket(void *pTicket, int cbMaxTicket, uint32 *pcbTicket);
 static void *Vellum_PickUser(const char *ver);
 static void *Vellum_PickFriends(const char *ver);
@@ -384,14 +384,23 @@ public:
 	virtual uint8 GetCurrentBatteryPower() { return 255; }
 	virtual uint32 GetAppID() { return Vellum_GetIdentity().app_id; }
 	virtual void SetOverlayNotificationPosition(int) {}
-	virtual bool IsAPICallCompleted(SteamAPICall_t, bool *pbFailed)
+	virtual bool IsAPICallCompleted(SteamAPICall_t call, bool *pbFailed)
 	{
+		if (Vellum_HttpCallPending(call)) {
+			return false;
+		}
+		if (Vellum_HttpIsCallCompleted(call, pbFailed)) {
+			return true;
+		}
 		if (pbFailed) *pbFailed = true;
 		return true;
 	}
 	virtual int GetAPICallFailureReason(SteamAPICall_t) { return 1; }
-	virtual bool GetAPICallResult(SteamAPICall_t, void *, int, int, bool *pbFailed)
+	virtual bool GetAPICallResult(SteamAPICall_t call, void *data, int cub, int expected, bool *pbFailed)
 	{
+		if (Vellum_HttpGetCallResult(call, data, cub, expected, pbFailed)) {
+			return true;
+		}
 		if (pbFailed) *pbFailed = true;
 		return false;
 	}
@@ -515,33 +524,6 @@ static int Vellum_ListCount(HServerListRequest h);
 static void Vellum_RefreshListServer(HServerListRequest h, int i);
 static void Vellum_RefreshListQuery(HServerListRequest h);
 static bool Vellum_ListIsRefreshing(HServerListRequest h);
-
-class SteamHTTP {
-public:
-	virtual HTTPRequestHandle CreateHTTPRequest(int, const char *) { return 0; }
-	virtual bool SetHTTPRequestContextValue(HTTPRequestHandle, uint64) { return false; }
-	virtual bool SetHTTPRequestNetworkActivityTimeout(HTTPRequestHandle, uint32) { return false; }
-	virtual bool SetHTTPRequestHeaderValue(HTTPRequestHandle, const char *, const char *) { return false; }
-	virtual bool SetHTTPRequestGetOrPostParameter(HTTPRequestHandle, const char *, const char *) { return false; }
-	virtual bool SendHTTPRequest(HTTPRequestHandle, SteamAPICall_t *) { return false; }
-	virtual bool SendHTTPRequestAndStreamResponse(HTTPRequestHandle, SteamAPICall_t *) { return false; }
-	virtual bool DeferHTTPRequest(HTTPRequestHandle) { return false; }
-	virtual bool PrioritizeHTTPRequest(HTTPRequestHandle) { return false; }
-	virtual bool GetHTTPResponseHeaderSize(HTTPRequestHandle, const char *, uint32 *) { return false; }
-	virtual bool GetHTTPResponseHeaderValue(HTTPRequestHandle, const char *, uint8 *, uint32) { return false; }
-	virtual bool GetHTTPResponseBodySize(HTTPRequestHandle, uint32 *) { return false; }
-	virtual bool GetHTTPResponseBodyData(HTTPRequestHandle, uint8 *, uint32) { return false; }
-	virtual bool GetHTTPStreamingResponseBodyData(HTTPRequestHandle, uint32, uint8 *, uint32) { return false; }
-	virtual bool ReleaseHTTPRequest(HTTPRequestHandle) { return false; }
-	virtual bool GetHTTPDownloadProgressPct(HTTPRequestHandle, float *) { return false; }
-	virtual bool SetHTTPRequestRawPostBody(HTTPRequestHandle, const char *, uint8 *, uint32) { return false; }
-	virtual bool SetHTTPRequestAbsoluteTimeoutMS(HTTPRequestHandle, uint32) { return false; }
-	virtual bool GetHTTPRequestWasTimedOut(HTTPRequestHandle, bool *out)
-	{
-		if (out) *out = false;
-		return false;
-	}
-};
 
 class SteamMatchmaking {
 public:
@@ -956,7 +938,6 @@ static SteamFriends g_friends;
 static SteamFriends017 g_friends017;
 static SteamUtils g_utils;
 static SteamApps g_apps;
-static SteamHTTP g_http;
 static SteamMatchmaking g_mm;
 static SteamMatchmakingServers g_mms;
 static SteamUserStats g_stats;
@@ -1013,7 +994,7 @@ struct GetAuthSessionTicketResponse_t {
 	int m_eResult;
 };
 
-#define VELLUM_CB_QUEUE 8
+#define VELLUM_CB_QUEUE 32
 
 struct VellumQueuedCallback {
 	HSteamUser user;
@@ -1030,7 +1011,7 @@ static int g_cb_have_last;
 static int g_gs_logged_on;
 static uint32 g_gs_bots;
 
-static void Vellum_QueueCallback(HSteamUser user, int id, const void *data, int size)
+void Vellum_QueueCallback(HSteamUser user, int id, const void *data, int size)
 {
 	VellumQueuedCallback *slot;
 	if (size < 0 || size > (int)sizeof(g_cbq[0].data)) {
@@ -1632,6 +1613,7 @@ static void Vellum_FlushListCallbacks()
 {
 	int r;
 	Vellum_QueryThink();
+	Vellum_HttpThink();
 	Vellum_StartListPings();
 	for (r = 0; r < VELLUM_REQ_MAX; r++) {
 		VellumListReq *req = &g_reqs[r];
@@ -1818,7 +1800,7 @@ public:
 	virtual uint32 GetIPCCallCount() { return 0; }
 	virtual void SetWarningMessageHook(SteamAPIWarningMessageHook_t) {}
 	virtual bool BShutdownIfAllPipesClosed() { return true; }
-	virtual void *GetISteamHTTP(HSteamUser, HSteamPipe, const char *) { return &g_http; }
+	virtual void *GetISteamHTTP(HSteamUser, HSteamPipe, const char *) { return Vellum_SteamHTTP(); }
 	virtual void *GetISteamUnifiedMessages(HSteamUser, HSteamPipe, const char *) { return &g_unified; }
 	virtual void *GetISteamController(HSteamUser, HSteamPipe, const char *) { return NULL; }
 	virtual void *GetISteamUGC(HSteamUser, HSteamPipe, const char *) { return NULL; }
@@ -1872,7 +1854,7 @@ public:
 	virtual uint32 GetIPCCallCount() { return 0; }
 	virtual void SetWarningMessageHook(SteamAPIWarningMessageHook_t) {}
 	virtual bool BShutdownIfAllPipesClosed() { return true; }
-	virtual void *GetISteamHTTP(HSteamUser, HSteamPipe, const char *) { return &g_http; }
+	virtual void *GetISteamHTTP(HSteamUser, HSteamPipe, const char *) { return Vellum_SteamHTTP(); }
 	virtual void *DEPRECATED_GetISteamUnifiedMessages(HSteamUser, HSteamPipe, const char *) { return &g_unified; }
 	virtual void *GetISteamController(HSteamUser, HSteamPipe, const char *) { return NULL; }
 	virtual void *GetISteamUGC(HSteamUser, HSteamPipe, const char *) { return NULL; }
@@ -2014,7 +1996,7 @@ STEAM_EXPORT void STEAM_CALL Steam_FreeLastCallback(HSteamPipe)
 	g_cb_have_last = 0;
 }
 
-STEAM_EXPORT bool STEAM_CALL Steam_GetAPICallResult(HSteamPipe, SteamAPICall_t, void *, int, int, bool *)
+STEAM_EXPORT bool STEAM_CALL Steam_GetAPICallResult(HSteamPipe, SteamAPICall_t call, void *data, int cub, int expected, bool *failed)
 {
-	return false;
+	return Vellum_HttpGetCallResult(call, data, cub, expected, failed);
 }

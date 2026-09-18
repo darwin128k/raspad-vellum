@@ -4,15 +4,17 @@ if(WIN32)
         identity.cpp
         steam_ifaces.cpp
         steam_query.cpp
+        steam_http.cpp
         steamclient.def
     )
-    target_link_libraries(steamclient PRIVATE advapi32 ws2_32)
+    target_link_libraries(steamclient PRIVATE advapi32 ws2_32 wininet)
     target_compile_definitions(steamclient PRIVATE _CRT_SECURE_NO_WARNINGS)
 else()
     add_library(steamclient SHARED
         identity.cpp
         steam_ifaces.cpp
         steam_query.cpp
+        steam_http.cpp
     )
     target_compile_options(steamclient PRIVATE -fvisibility=hidden)
     target_link_options(steamclient PRIVATE -static-libstdc++ -static-libgcc)
